@@ -6,9 +6,10 @@ Rules-Requires-Root: no
 Build-Depends:
  debhelper-compat (= 13),
  cmake,
- libmsgpack-dev,
+# libmsgpack-dev,
+ libblas-dev,
  pkg-config,
- python3-venv,
+# python3-venv,
  rocm-cmake,
  rocm-core,
  rocm-env,
