@@ -6,10 +6,8 @@ Rules-Requires-Root: no
 Build-Depends:
  debhelper-compat (= 13),
  cmake,
-# libmsgpack-dev,
  libblas-dev,
  pkg-config,
-# python3-venv,
  rocm-cmake,
  rocm-core,
  rocm-env,
@@ -29,6 +27,17 @@ Depends:
  rocm-core,
  rocm-env,
  rocm-hip-on-rocclr,
-Description: Next generation BLAS implementation for ROCm platform
+Description: Next generation BLAS implementation for ROCm platform - binary
+ rocBLAS is the ROCm Basic Linear Algebra Subprograms (BLAS) library. rocBLAS is
+ implemented in the HIP programming language and optimized for AMD GPUs.
+
+Package: rocm-rocblas-dev
+Architecture: any
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+ rocm-hip-on-rocclr-dev,
+ rocm-rocblas,
+Description: Next generation BLAS implementation for ROCm platform - dev
  rocBLAS is the ROCm Basic Linear Algebra Subprograms (BLAS) library. rocBLAS is
  implemented in the HIP programming language and optimized for AMD GPUs.
