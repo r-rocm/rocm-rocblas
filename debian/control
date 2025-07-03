@@ -23,6 +23,7 @@ Architecture: any
 Depends:
  ${shlibs:Depends},
  ${misc:Depends},
+ libblas3,
  rocm-cmake,
  rocm-core,
  rocm-env,
@@ -36,6 +37,7 @@ Architecture: any
 Depends:
  ${shlibs:Depends},
  ${misc:Depends},
+ libblas-dev,
  rocm-hip-on-rocclr-dev,
  rocm-rocblas,
 Description: Next generation BLAS implementation for ROCm platform - dev
