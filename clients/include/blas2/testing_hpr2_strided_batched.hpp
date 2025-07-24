@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2024 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2018-2025 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -27,10 +27,10 @@
 template <typename T>
 void testing_hpr2_strided_batched_bad_arg(const Arguments& arg)
 {
-    auto rocblas_hpr2_strided_batched_fn    = arg.api == FORTRAN
+    auto rocblas_hpr2_strided_batched_fn    = arg.api & c_API_FORTRAN
                                                   ? rocblas_hpr2_strided_batched<T, true>
                                                   : rocblas_hpr2_strided_batched<T, false>;
-    auto rocblas_hpr2_strided_batched_fn_64 = arg.api == FORTRAN_64
+    auto rocblas_hpr2_strided_batched_fn_64 = arg.api & c_API_FORTRAN
                                                   ? rocblas_hpr2_strided_batched_64<T, true>
                                                   : rocblas_hpr2_strided_batched_64<T, false>;
 
@@ -48,7 +48,8 @@ void testing_hpr2_strided_batched_bad_arg(const Arguments& arg)
         rocblas_stride stride_y    = 100;
         rocblas_stride stride_A    = 100;
 
-        device_vector<T> alpha_d(1), zero_d(1);
+        DEVICE_MEMCHECK(device_vector<T>, alpha_d, (1));
+        DEVICE_MEMCHECK(device_vector<T>, zero_d, (1));
 
         const T alpha_h(1), zero_h(0);
 
@@ -64,15 +65,11 @@ void testing_hpr2_strided_batched_bad_arg(const Arguments& arg)
         }
 
         // Allocate device memory
-        device_strided_batch_matrix<T> dAp_1(
-            1, rocblas_packed_matrix_size(N), 1, stride_A, batch_count);
-        device_strided_batch_vector<T> dx(N, incx, stride_x, batch_count);
-        device_strided_batch_vector<T> dy(N, incy, stride_y, batch_count);
-
-        // Check device memory allocation
-        CHECK_DEVICE_ALLOCATION(dAp_1.memcheck());
-        CHECK_DEVICE_ALLOCATION(dx.memcheck());
-        CHECK_DEVICE_ALLOCATION(dy.memcheck());
+        DEVICE_MEMCHECK(device_strided_batch_matrix<T>,
+                        dAp_1,
+                        (1, rocblas_packed_matrix_size(N), 1, stride_A, batch_count));
+        DEVICE_MEMCHECK(device_strided_batch_vector<T>, dx, (N, incx, stride_x, batch_count));
+        DEVICE_MEMCHECK(device_strided_batch_vector<T>, dy, (N, incy, stride_y, batch_count));
 
         DAPI_EXPECT(rocblas_status_invalid_handle,
                     rocblas_hpr2_strided_batched_fn,
@@ -226,10 +223,10 @@ void testing_hpr2_strided_batched_bad_arg(const Arguments& arg)
 template <typename T>
 void testing_hpr2_strided_batched(const Arguments& arg)
 {
-    auto rocblas_hpr2_strided_batched_fn    = arg.api == FORTRAN
+    auto rocblas_hpr2_strided_batched_fn    = arg.api & c_API_FORTRAN
                                                   ? rocblas_hpr2_strided_batched<T, true>
                                                   : rocblas_hpr2_strided_batched<T, false>;
-    auto rocblas_hpr2_strided_batched_fn_64 = arg.api == FORTRAN_64
+    auto rocblas_hpr2_strided_batched_fn_64 = arg.api & c_API_FORTRAN
                                                   ? rocblas_hpr2_strided_batched_64<T, true>
                                                   : rocblas_hpr2_strided_batched_64<T, false>;
 
@@ -271,37 +268,22 @@ void testing_hpr2_strided_batched(const Arguments& arg)
 
     // Naming: `h` is in CPU (host) memory(eg hAp_1), `d` is in GPU (device) memory (eg dAp_1).
     // Allocate host memory
-    host_strided_batch_matrix<T> hA(N, N, N, stride_A, batch_count);
-    host_strided_batch_matrix<T> hAp_1(1, size_A, 1, stride_A, batch_count);
-    host_strided_batch_matrix<T> hAp_2(1, size_A, 1, stride_A, batch_count);
-    host_strided_batch_matrix<T> hA_gold(1, size_A, 1, stride_A, batch_count);
-    host_strided_batch_vector<T> hx(N, incx, stride_x, batch_count);
-    host_strided_batch_vector<T> hy(N, incy, stride_y, batch_count);
-    host_vector<T>               halpha(1);
-
-    // Check host memory allocation
-    CHECK_HIP_ERROR(hA.memcheck());
-    CHECK_HIP_ERROR(hAp_1.memcheck());
-    CHECK_HIP_ERROR(hAp_2.memcheck());
-    CHECK_HIP_ERROR(hA_gold.memcheck());
-    CHECK_HIP_ERROR(hx.memcheck());
-    CHECK_HIP_ERROR(hy.memcheck());
+    HOST_MEMCHECK(host_strided_batch_matrix<T>, hA, (N, N, N, stride_A, batch_count));
+    HOST_MEMCHECK(host_strided_batch_matrix<T>, hAp_1, (1, size_A, 1, stride_A, batch_count));
+    HOST_MEMCHECK(host_strided_batch_matrix<T>, hAp_2, (1, size_A, 1, stride_A, batch_count));
+    HOST_MEMCHECK(host_strided_batch_matrix<T>, hA_gold, (1, size_A, 1, stride_A, batch_count));
+    HOST_MEMCHECK(host_strided_batch_vector<T>, hx, (N, incx, stride_x, batch_count));
+    HOST_MEMCHECK(host_strided_batch_vector<T>, hy, (N, incy, stride_y, batch_count));
+    HOST_MEMCHECK(host_vector<T>, halpha, (1));
 
     halpha[0] = h_alpha;
 
     // Allocate device memory
-    device_strided_batch_matrix<T> dAp_1(1, size_A, 1, stride_A, batch_count);
-    device_strided_batch_matrix<T> dAp_2(1, size_A, 1, stride_A, batch_count);
-    device_strided_batch_vector<T> dx(N, incx, stride_x, batch_count);
-    device_strided_batch_vector<T> dy(N, incy, stride_y, batch_count);
-    device_vector<T>               d_alpha(1);
-
-    // Check device memory allocation
-    CHECK_DEVICE_ALLOCATION(dAp_1.memcheck());
-    CHECK_DEVICE_ALLOCATION(dAp_2.memcheck());
-    CHECK_DEVICE_ALLOCATION(dx.memcheck());
-    CHECK_DEVICE_ALLOCATION(dy.memcheck());
-    CHECK_DEVICE_ALLOCATION(d_alpha.memcheck());
+    DEVICE_MEMCHECK(device_strided_batch_matrix<T>, dAp_1, (1, size_A, 1, stride_A, batch_count));
+    DEVICE_MEMCHECK(device_strided_batch_matrix<T>, dAp_2, (1, size_A, 1, stride_A, batch_count));
+    DEVICE_MEMCHECK(device_strided_batch_vector<T>, dx, (N, incx, stride_x, batch_count));
+    DEVICE_MEMCHECK(device_strided_batch_vector<T>, dy, (N, incy, stride_y, batch_count));
+    DEVICE_MEMCHECK(device_vector<T>, d_alpha, (1));
 
     // Initialize data on host memory
     rocblas_init_matrix(
@@ -368,29 +350,61 @@ void testing_hpr2_strided_batched(const Arguments& arg)
 
         if(arg.repeatability_check)
         {
-            host_strided_batch_matrix<T> hAp_copy(1, size_A, 1, stride_A, batch_count);
-            CHECK_HIP_ERROR(hAp_copy.memcheck());
+            HOST_MEMCHECK(
+                host_strided_batch_matrix<T>, hAp_copy, (1, size_A, 1, stride_A, batch_count));
             CHECK_HIP_ERROR(hAp_2.transfer_from(dAp_2));
+            // multi-GPU support
+            int device_id, device_count;
+            CHECK_HIP_ERROR(limit_device_count(device_count, (int)arg.devices));
 
-            for(int i = 0; i < arg.iters; i++)
+            for(int dev_id = 0; dev_id < device_count; dev_id++)
             {
-                DAPI_CHECK(rocblas_hpr2_strided_batched_fn,
-                           (handle,
-                            uplo,
-                            N,
-                            d_alpha,
-                            dx,
-                            incx,
-                            stride_x,
-                            dy,
-                            incy,
-                            stride_y,
-                            dAp_2,
-                            stride_A,
-                            batch_count));
+                CHECK_HIP_ERROR(hipGetDevice(&device_id));
+                if(device_id != dev_id)
+                    CHECK_HIP_ERROR(hipSetDevice(dev_id));
 
-                CHECK_HIP_ERROR(hAp_copy.transfer_from(dAp_2));
-                unit_check_general<T>(1, size_A, 1, stride_A, hA, hAp_copy, batch_count);
+                //New rocblas handle for new device
+                rocblas_local_handle handle_copy{arg};
+
+                // Allocate device memory
+                DEVICE_MEMCHECK(device_strided_batch_matrix<T>,
+                                dAp_2_copy,
+                                (1, size_A, 1, stride_A, batch_count));
+                DEVICE_MEMCHECK(
+                    device_strided_batch_vector<T>, dx_copy, (N, incx, stride_x, batch_count));
+                DEVICE_MEMCHECK(
+                    device_strided_batch_vector<T>, dy_copy, (N, incy, stride_y, batch_count));
+                DEVICE_MEMCHECK(device_vector<T>, d_alpha_copy, (1));
+
+                // copy data from CPU to device
+                CHECK_HIP_ERROR(dx_copy.transfer_from(hx));
+                CHECK_HIP_ERROR(dy_copy.transfer_from(hy));
+                CHECK_HIP_ERROR(dAp_2_copy.transfer_from(hAp_1));
+                CHECK_HIP_ERROR(d_alpha_copy.transfer_from(halpha));
+
+                CHECK_ROCBLAS_ERROR(
+                    rocblas_set_pointer_mode(handle_copy, rocblas_pointer_mode_device));
+
+                for(int runs = 0; runs < arg.iters; runs++)
+                {
+                    DAPI_CHECK(rocblas_hpr2_strided_batched_fn,
+                               (handle_copy,
+                                uplo,
+                                N,
+                                d_alpha_copy,
+                                dx_copy,
+                                incx,
+                                stride_x,
+                                dy_copy,
+                                incy,
+                                stride_y,
+                                dAp_2_copy,
+                                stride_A,
+                                batch_count));
+
+                    CHECK_HIP_ERROR(hAp_copy.transfer_from(dAp_2_copy));
+                    unit_check_general<T>(1, size_A, 1, stride_A, hA, hAp_copy, batch_count);
+                }
             }
             return;
         }

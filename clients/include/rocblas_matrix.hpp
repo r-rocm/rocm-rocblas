@@ -22,7 +22,7 @@
 
 #pragma once
 
-#include "utility.hpp"
+#include "client_utility.hpp"
 
 #include "d_vector.hpp"
 
@@ -105,6 +105,10 @@ inline void rocblas_init_matrix(host_strided_batch_matrix<T>& hA,
         else
             rocblas_init_identity<T>(hA);
     }
+    else if(arg.initialization == rocblas_initialization::zero)
+    {
+        rocblas_init_matrix_zero<T>(hA);
+    }
     else
     {
 #ifdef GOOGLE_TEST
@@ -185,6 +189,10 @@ inline void rocblas_init_matrix(host_batch_matrix<T>&     hA,
         else
             rocblas_init_identity<T>(hA);
     }
+    else if(arg.initialization == rocblas_initialization::zero)
+    {
+        rocblas_init_matrix_zero<T>(hA);
+    }
     else
     {
 #ifdef GOOGLE_TEST
@@ -203,6 +211,7 @@ inline void rocblas_init_matrix(host_batch_matrix<T>&     hA,
 //! @param arg Specifies the argument class.
 //! @param nan_init Initialize matrix with Nan's depending upon the rocblas_check_nan_init enum value.
 //! @param matrix_type Initialization of the matrix based upon the rocblas_check_matrix_type enum value.
+//! @param seedReset reset the seed if true, do not reset the seed otherwise. Use init_cos if seedReset is true else use init_sin.
 //! @param alternating_sign Initialize matrix so adjacent entries have alternating sign.
 //!
 template <typename T, bool altInit = false>
@@ -264,6 +273,10 @@ inline void rocblas_init_matrix(host_matrix<T>&           hA,
         else
             rocblas_init_identity<T>(hA);
     }
+    else if(arg.initialization == rocblas_initialization::zero)
+    {
+        rocblas_init_matrix_zero<T>(hA);
+    }
     else
     {
 #ifdef GOOGLE_TEST
@@ -275,3 +288,21 @@ inline void rocblas_init_matrix(host_matrix<T>&           hA,
 #endif
     }
 }
+
+//!
+//! @brief Initialize a device matrix.
+//! @param dA The device matrix.
+//! @param arg Specifies the argument class.
+//! @param nan_init Initialize matrix with Nan's depending upon the rocblas_check_nan_init enum value.
+//! @param matrix_type Initialization of the matrix based upon the rocblas_check_matrix_type enum value.
+//! @param seedReset reset the seed if true, do not reset the seed otherwise. Use init_cos if seedReset is true else use init_sin.
+//! @param alternating_sign Initialize matrix so adjacent entries have alternating sign.
+//!
+template <typename T, bool altInit = false>
+void rocblas_init_matrix(rocblas_handle                  handle,
+                         device_strided_batch_matrix<T>& dA,
+                         const Arguments&                arg,
+                         rocblas_check_nan_init          nan_init,
+                         rocblas_check_matrix_type       matrix_type,
+                         bool                            seedReset        = false,
+                         bool                            alternating_sign = false);

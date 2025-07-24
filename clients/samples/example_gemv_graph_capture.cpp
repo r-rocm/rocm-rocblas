@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2016-2023 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2016-2024 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -19,7 +19,7 @@
  * CTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  * ************************************************************************ */
 
-#include "utility.hpp"
+#include "client_utility.hpp"
 #include <hip/hip_runtime.h>
 #include <rocblas/rocblas.h>
 
@@ -173,6 +173,10 @@ int main()
 
     CHECK_HIP_ERROR(hipStreamDestroy(stream_1));
     CHECK_HIP_ERROR(hipStreamDestroy(stream_2));
+
+    CHECK_HIP_ERROR(hipFree(dA));
+    CHECK_HIP_ERROR(hipFree(dX));
+    CHECK_HIP_ERROR(hipFree(dY));
 
     return EXIT_SUCCESS;
 }

@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2024 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2018-2025 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -27,9 +27,9 @@
 template <typename T>
 void testing_symv_bad_arg(const Arguments& arg)
 {
-    auto rocblas_symv_fn = arg.api == FORTRAN ? rocblas_symv<T, true> : rocblas_symv<T, false>;
+    auto rocblas_symv_fn = arg.api & c_API_FORTRAN ? rocblas_symv<T, true> : rocblas_symv<T, false>;
     auto rocblas_symv_fn_64
-        = arg.api == FORTRAN_64 ? rocblas_symv_64<T, true> : rocblas_symv_64<T, false>;
+        = arg.api & c_API_FORTRAN ? rocblas_symv_64<T, true> : rocblas_symv_64<T, false>;
 
     for(auto pointer_mode : {rocblas_pointer_mode_host, rocblas_pointer_mode_device})
     {
@@ -42,7 +42,10 @@ void testing_symv_bad_arg(const Arguments& arg)
         const int64_t      incy = 1;
         const int64_t      lda  = 100;
 
-        device_vector<T> alpha_d(1), beta_d(1), one_d(1), zero_d(1);
+        DEVICE_MEMCHECK(device_vector<T>, alpha_d, (1));
+        DEVICE_MEMCHECK(device_vector<T>, beta_d, (1));
+        DEVICE_MEMCHECK(device_vector<T>, one_d, (1));
+        DEVICE_MEMCHECK(device_vector<T>, zero_d, (1));
 
         const T alpha_h(1), beta_h(2), one_h(1), zero_h(0);
 
@@ -64,14 +67,9 @@ void testing_symv_bad_arg(const Arguments& arg)
         }
 
         // Allocate device memory
-        device_matrix<T> dA(N, N, lda);
-        device_vector<T> dx(N, incx);
-        device_vector<T> dy(N, incy);
-
-        // Check device memory allocation
-        CHECK_DEVICE_ALLOCATION(dA.memcheck());
-        CHECK_DEVICE_ALLOCATION(dx.memcheck());
-        CHECK_DEVICE_ALLOCATION(dy.memcheck());
+        DEVICE_MEMCHECK(device_matrix<T>, dA, (N, N, lda));
+        DEVICE_MEMCHECK(device_vector<T>, dx, (N, incx));
+        DEVICE_MEMCHECK(device_vector<T>, dy, (N, incy));
 
         DAPI_EXPECT(rocblas_status_invalid_handle,
                     rocblas_symv_fn,
@@ -133,17 +131,17 @@ void testing_symv_bad_arg(const Arguments& arg)
 template <typename T>
 void testing_symv(const Arguments& arg)
 {
-    auto rocblas_symv_fn = arg.api == FORTRAN ? rocblas_symv<T, true> : rocblas_symv<T, false>;
+    auto rocblas_symv_fn = arg.api & c_API_FORTRAN ? rocblas_symv<T, true> : rocblas_symv<T, false>;
     auto rocblas_symv_fn_64
-        = arg.api == FORTRAN_64 ? rocblas_symv_64<T, true> : rocblas_symv_64<T, false>;
+        = arg.api & c_API_FORTRAN ? rocblas_symv_64<T, true> : rocblas_symv_64<T, false>;
 
     int64_t N    = arg.N;
     int64_t lda  = arg.lda;
     int64_t incx = arg.incx;
     int64_t incy = arg.incy;
 
-    host_vector<T> alpha(1);
-    host_vector<T> beta(1);
+    HOST_MEMCHECK(host_vector<T>, alpha, (1));
+    HOST_MEMCHECK(host_vector<T>, beta, (1));
     alpha[0] = arg.get_alpha<T>();
     beta[0]  = arg.get_beta<T>();
 
@@ -163,24 +161,17 @@ void testing_symv(const Arguments& arg)
 
     // Naming: `h` is in CPU (host) memory(eg hA), `d` is in GPU (device) memory (eg dA).
     // Allocate host memory
-    host_matrix<T> hA(N, N, lda);
-    host_vector<T> hx(N, incx);
-    host_vector<T> hy(N, incy);
-    host_vector<T> hy_gold(N, incy); // gold standard
+    HOST_MEMCHECK(host_matrix<T>, hA, (N, N, lda));
+    HOST_MEMCHECK(host_vector<T>, hx, (N, incx));
+    HOST_MEMCHECK(host_vector<T>, hy, (N, incy));
+    HOST_MEMCHECK(host_vector<T>, hy_gold, (N, incy)); // gold standard
 
     // Allocate device memory
-    device_matrix<T> dA(N, N, lda);
-    device_vector<T> dx(N, incx);
-    device_vector<T> dy(N, incy);
-    device_vector<T> d_alpha(1);
-    device_vector<T> d_beta(1);
-
-    // Check device memory allocation
-    CHECK_DEVICE_ALLOCATION(dA.memcheck());
-    CHECK_DEVICE_ALLOCATION(dx.memcheck());
-    CHECK_DEVICE_ALLOCATION(dy.memcheck());
-    CHECK_DEVICE_ALLOCATION(d_alpha.memcheck());
-    CHECK_DEVICE_ALLOCATION(d_beta.memcheck());
+    DEVICE_MEMCHECK(device_matrix<T>, dA, (N, N, lda));
+    DEVICE_MEMCHECK(device_vector<T>, dx, (N, incx));
+    DEVICE_MEMCHECK(device_vector<T>, dy, (N, incy));
+    DEVICE_MEMCHECK(device_vector<T>, d_alpha, (1));
+    DEVICE_MEMCHECK(device_vector<T>, d_beta, (1));
 
     // Initialize data on host memory
     rocblas_init_matrix(
@@ -233,14 +224,53 @@ void testing_symv(const Arguments& arg)
             {
                 // copy output from device to CPU
                 CHECK_HIP_ERROR(hy.transfer_from(dy));
-                host_vector<T> hy_copy(N, incy);
-                for(int i = 0; i < arg.iters; i++)
+                HOST_MEMCHECK(host_vector<T>, hy_copy, (N, incy));
+                // multi-GPU support
+                int device_id, device_count;
+                CHECK_HIP_ERROR(limit_device_count(device_count, (int)arg.devices));
+
+                for(int dev_id = 0; dev_id < device_count; dev_id++)
                 {
-                    dy.transfer_from(hy_gold);
-                    CHECK_ROCBLAS_ERROR(rocblas_symv_fn(
-                        handle, uplo, N, d_alpha, dA, lda, dx, incx, d_beta, dy, incy));
-                    CHECK_HIP_ERROR(hy_copy.transfer_from(dy));
-                    unit_check_general<T>(1, N, incy, hy, hy_copy);
+                    CHECK_HIP_ERROR(hipGetDevice(&device_id));
+                    if(device_id != dev_id)
+                        CHECK_HIP_ERROR(hipSetDevice(dev_id));
+
+                    //New rocblas handle for new device
+                    rocblas_local_handle handle_copy{arg};
+
+                    // Allocate device memory
+                    DEVICE_MEMCHECK(device_matrix<T>, dA_copy, (N, N, lda));
+                    DEVICE_MEMCHECK(device_vector<T>, dx_copy, (N, incx));
+                    DEVICE_MEMCHECK(device_vector<T>, dy_copy, (N, incy));
+                    DEVICE_MEMCHECK(device_vector<T>, d_alpha_copy, (1));
+                    DEVICE_MEMCHECK(device_vector<T>, d_beta_copy, (1));
+
+                    // copy data from CPU to device
+                    CHECK_HIP_ERROR(dx_copy.transfer_from(hx));
+                    CHECK_HIP_ERROR(dA_copy.transfer_from(hA));
+                    CHECK_HIP_ERROR(d_alpha_copy.transfer_from(alpha));
+                    CHECK_HIP_ERROR(d_beta_copy.transfer_from(beta));
+
+                    CHECK_ROCBLAS_ERROR(
+                        rocblas_set_pointer_mode(handle_copy, rocblas_pointer_mode_device));
+
+                    for(int runs = 0; runs < arg.iters; runs++)
+                    {
+                        CHECK_HIP_ERROR(dy_copy.transfer_from(hy_gold));
+                        CHECK_ROCBLAS_ERROR(rocblas_symv_fn(handle_copy,
+                                                            uplo,
+                                                            N,
+                                                            d_alpha_copy,
+                                                            dA_copy,
+                                                            lda,
+                                                            dx_copy,
+                                                            incx,
+                                                            d_beta_copy,
+                                                            dy_copy,
+                                                            incy));
+                        CHECK_HIP_ERROR(hy_copy.transfer_from(dy_copy));
+                        unit_check_general<T>(1, N, incy, hy, hy_copy);
+                    }
                 }
                 return;
             }

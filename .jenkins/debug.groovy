@@ -15,9 +15,18 @@ def runCI =
     nodeDetails, jobName->
 
     def prj = new rocProject('rocBLAS', 'Debug')
+
     // customize for project
-    prj.paths.build_command = './install.sh -c -g --cleanup'
-    prj.defaults.ccache = true
+    prj.paths.build_command = './install.sh -c -g'
+
+    def noHipblasLT = env.BRANCH_NAME ==~ /PR-\d+/ && pullRequest.labels.contains("noHipblasLT")
+
+    if (!noHipblasLT)
+    {
+        prj.libraryDependencies = ['hipBLAS-common', 'hipBLASLt']
+    }
+
+    prj.defaults.ccache = false
 
     // Define test architectures, optional rocm version argument is available
     def nodes = new dockerNodes(nodeDetails, jobName, prj)
@@ -33,7 +42,14 @@ def runCI =
         commonGroovy.runCompileCommand(platform, project, jobName)
     }
 
-    buildProject(prj, formatCheck, nodes.dockerArray, compileCommand, null, null)
+    def packageCommand =
+    {
+        platform, project->
+
+        commonGroovy.runPackageCommand(platform, project, debug=true)
+    }
+
+    buildProject(prj, formatCheck, nodes.dockerArray, compileCommand, null, packageCommand)
 
 }
 

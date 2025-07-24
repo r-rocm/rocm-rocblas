@@ -100,8 +100,26 @@ Tests:
     - { alpha:  0.5, beta:  0.5 }
   batch_count: [ 1 ]
   pointer_mode_host: false
-  gpu_arch: '90a'
+  gpu_arch: ['90a','942']
   os_flags: LINUX
+
+- name: gemmt_64
+  category: stress
+  uplo: [ U , L ] # op(A) and op(B) are NxK
+  matrix_size:
+    - { N:  35, K:  2,  lda:  2147483649, ldb: 36, ldc: 36, batch_count: 1, transA: N, transB: N, uplo: U }
+    - { N:  35, K:  2,  lda: 36, ldb: 2147483649, ldc: 36, batch_count: 1, transA: T, transB: T, uplo: L }
+    - { N:  2, K:  35,  lda: 36, ldb: 36, ldc: 2147483649, batch_count: 1, transA: T, transB: T, uplo: U }
+    - { N:  2, K:   2,  lda: 2, ldb: 2, ldc: 2, batch_count: *c_grid_yz_require_passes, transA: N, transB: T, uplo: L}
+    - { N:  3, K:   469, lda: 3, ldb: 469, ldc: 3, transA: N, transB: N, uplo: U }
+  api: [ C_64 ]
+  alpha_beta:
+    - { alpha:  1.0, beta:  1.0 }
+  os_flags: [ LINUX ]
+  function:
+    - gemmt_strided_batched: *single_precision
+  stride_scale: 1
+  gpu_arch: '9??'
 
 # batched
 - name: gemmt_batched_bad
@@ -157,6 +175,20 @@ Tests:
   alpha_beta: *alpha_beta
   batch_count: [ 2 ]
 
+- name: gemmt_batched_64 # TODO: add tests for K, lda, ldb, ldc > int32_t_max
+  category: stress
+  api: [C_64]
+  function: gemmt_batched
+  precision: *single_precision
+  uplo: [ U    ] # op(A) and op(B) are NxK
+  matrix_size:
+    - { transA: N, transB: N,  N:     3, K:  469  ,  lda:     3,  ldb:     469  ,  ldc: 3 }
+  alpha_beta:
+    - { alpha:  0.5, beta:  0.5 }
+  batch_count: [ 65536 ]
+  pointer_mode_host: false
+  os_flags: LINUX
+
 # strided batched
 - name: gemmt_strided_batched_bad
   category: quick
@@ -211,6 +243,34 @@ Tests:
   alpha_beta: *alpha_beta
   batch_count: [ 2 ]
 
+- name: gemmt_large_batch
+  category: stress
+  function:
+    - gemmt_batched
+    - gemmt_strided_batched
+  precision: *single_precision
+  uplo: [ L ]
+  transA: [ T ]
+  transB: [ N ]
+  matrix_size:
+    - { N: 3, K: 3, lda: 3, ldb: 3, ldc: 3, batch_count: *c_grid_yz_require_passes }
+  alpha_beta:
+    - { alpha:  0.5, beta:  0.5 }
+
+- name: gemmt_strided_batched_64 # TODO: add tests for K, lda, ldb, ldc > int32_t_max
+  category: stress
+  api: [C_64]
+  function: gemmt_strided_batched
+  precision: *single_precision
+  uplo: [ U    ] # op(A) and op(B) are NxK
+  matrix_size:
+    - { transA: N, transB: N,  N:     3, K:  469  ,  lda:     3,  ldb:     469  ,  ldc: 3 }
+  alpha_beta:
+    - { alpha:  0.5, beta:  0.5 }
+  batch_count: [ 65536 ]
+  pointer_mode_host: false
+  os_flags: LINUX
+
 - name: gemmt_graph_test
   category: pre_checkin
   function:
@@ -245,5 +305,6 @@ Tests:
   atomics_mode: 0
   iters: 5
   initialization: hpl
+  devices: 4
   repeatability_check: true
 ...

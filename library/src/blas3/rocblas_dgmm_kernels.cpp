@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2016-2023 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2016-2024 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -20,6 +20,7 @@
  *
  * ************************************************************************ */
 
+#include "device_macros.hpp"
 #include "handle.hpp"
 #include "rocblas_dgmm.hpp"
 
@@ -29,35 +30,47 @@ rocblas_dgmm_device(rocblas_int    m,
                     rocblas_int    n,
                     TConstPtr      Aa,
                     rocblas_stride offset_a,
-                    rocblas_int    lda,
+                    int64_t        lda,
                     rocblas_stride stride_a,
                     TConstPtr      Xa,
-                    rocblas_int    shift_x,
-                    rocblas_int    incx,
+                    int64_t        shift_x,
+                    int64_t        incx,
                     rocblas_stride stride_x,
                     TPtr           Ca,
                     rocblas_stride offset_c,
-                    rocblas_int    ldc,
-                    rocblas_stride stride_c)
+                    int64_t        ldc,
+                    rocblas_stride stride_c,
+                    rocblas_int    batch_count)
 {
-    rocblas_int tx = blockIdx.x * blockDim.x + threadIdx.x;
-    rocblas_int ty = blockIdx.y * blockDim.y + threadIdx.y;
+    rocblas_int tx    = blockIdx.x * DIM_X + threadIdx.x;
+    uint32_t    batch = blockIdx.z;
 
-    if(tx < m && ty < n)
+#if DEVICE_GRID_YZ_16BIT
+    for(; batch < batch_count; batch += c_YZ_grid_launch_limit)
     {
-        auto* A = load_ptr_batch(Aa, blockIdx.z, offset_a, stride_a);
-        auto* X = load_ptr_batch(Xa, blockIdx.z, shift_x, stride_x);
-        auto* C = load_ptr_batch(Ca, blockIdx.z, offset_c, stride_c);
+#endif
 
-        if(side_right)
+        //looping over ty
+        for(rocblas_int ty = blockIdx.y * DIM_Y + threadIdx.y; ty < n && tx < m;
+            ty += DIM_Y * gridDim.y)
         {
-            C[tx + size_t(ldc) * ty] = A[tx + size_t(lda) * ty] * X[ty * int64_t(incx)];
+            auto* A = load_ptr_batch(Aa, batch, offset_a, stride_a);
+            auto* X = load_ptr_batch(Xa, batch, shift_x, stride_x);
+            auto* C = load_ptr_batch(Ca, batch, offset_c, stride_c);
+
+            if constexpr(side_right)
+            {
+                C[tx + ldc * ty] = A[tx + lda * ty] * X[ty * incx];
+            }
+            else
+            {
+                C[tx + ldc * ty] = A[tx + lda * ty] * X[tx * incx];
+            }
         }
-        else
-        {
-            C[tx + size_t(ldc) * ty] = A[tx + size_t(lda) * ty] * X[tx * int64_t(incx)];
-        }
+
+#if DEVICE_GRID_YZ_16BIT
     }
+#endif
 }
 
 /*
@@ -75,87 +88,90 @@ rocblas_dgmm_device(rocblas_int    m,
  */
 
 template <typename TConstPtr, typename TPtr>
-rocblas_status rocblas_dgmm_template(rocblas_handle handle,
-                                     rocblas_side   side,
-                                     rocblas_int    m,
-                                     rocblas_int    n,
-                                     TConstPtr      A,
-                                     rocblas_stride offset_a,
-                                     rocblas_int    lda,
-                                     rocblas_stride stride_a,
-                                     TConstPtr      X,
-                                     rocblas_stride offset_x,
-                                     rocblas_int    incx,
-                                     rocblas_stride stride_x,
-                                     TPtr           C,
-                                     rocblas_stride offset_c,
-                                     rocblas_int    ldc,
-                                     rocblas_stride stride_c,
-                                     rocblas_int    batch_count)
+rocblas_status rocblas_internal_dgmm_launcher(rocblas_handle handle,
+                                              rocblas_side   side,
+                                              rocblas_int    m,
+                                              rocblas_int    n,
+                                              TConstPtr      A,
+                                              rocblas_stride offset_a,
+                                              int64_t        lda,
+                                              rocblas_stride stride_a,
+                                              TConstPtr      X,
+                                              rocblas_stride offset_x,
+                                              int64_t        incx,
+                                              rocblas_stride stride_x,
+                                              TPtr           C,
+                                              rocblas_stride offset_c,
+                                              int64_t        ldc,
+                                              rocblas_stride stride_c,
+                                              rocblas_int    batch_count)
 
 {
     hipStream_t rocblas_stream = handle->get_stream();
+    int         batches        = handle->getBatchGridDim((int)batch_count);
 
+    // in case of negative incx shift pointer to end of data for negative indexing
+    rocblas_int k       = side == rocblas_side_left ? m : n;
+    ptrdiff_t   shift_x = offset_x - ((incx < 0) ? ptrdiff_t(incx) * (k - 1) : 0);
+
+    // general case, any transA, transB, lda, incx, ldc
+    static constexpr int DGMM_DIM_X = 16;
+    static constexpr int DGMM_DIM_Y = 16;
+
+    rocblas_int blocksX = (m - 1) / DGMM_DIM_X + 1;
+    //blocksY should be <= 2^16 (65536) to avoid overflow as grid y and z block indices support only 16-bit values on some gfx
+    rocblas_int blocksY = std::min(c_YZ_grid_launch_limit, (n - 1) / DGMM_DIM_Y + 1);
+
+    dim3 dgmm_grid(blocksX, blocksY, batches);
+    dim3 dgmm_threads(DGMM_DIM_X, DGMM_DIM_Y);
+
+    if(rocblas_side_left == side)
     {
-        // in case of negative incx shift pointer to end of data for negative indexing
-        rocblas_int k       = side == rocblas_side_left ? m : n;
-        ptrdiff_t   shift_x = offset_x - ((incx < 0) ? ptrdiff_t(incx) * (k - 1) : 0);
-
-        // general case, any transA, transB, lda, incx, ldc
-        static constexpr int DGMM_DIM_X = 16;
-        static constexpr int DGMM_DIM_Y = 16;
-
-        rocblas_int blocksX = (m - 1) / DGMM_DIM_X + 1;
-        rocblas_int blocksY = (n - 1) / DGMM_DIM_Y + 1;
-
-        dim3 dgmm_grid(blocksX, blocksY, batch_count);
-        dim3 dgmm_threads(DGMM_DIM_X, DGMM_DIM_Y);
-
-        if(rocblas_side_left == side)
-        {
-            ROCBLAS_LAUNCH_KERNEL((rocblas_dgmm_device<DGMM_DIM_X, DGMM_DIM_Y, false>),
-                                  dgmm_grid,
-                                  dgmm_threads,
-                                  0,
-                                  rocblas_stream,
-                                  m,
-                                  n,
-                                  A,
-                                  offset_a,
-                                  lda,
-                                  stride_a,
-                                  X,
-                                  shift_x,
-                                  incx,
-                                  stride_x,
-                                  C,
-                                  offset_c,
-                                  ldc,
-                                  stride_c);
-        }
-        else
-        {
-            ROCBLAS_LAUNCH_KERNEL((rocblas_dgmm_device<DGMM_DIM_X, DGMM_DIM_Y, true>),
-                                  dgmm_grid,
-                                  dgmm_threads,
-                                  0,
-                                  rocblas_stream,
-                                  m,
-                                  n,
-                                  A,
-                                  offset_a,
-                                  lda,
-                                  stride_a,
-                                  X,
-                                  shift_x,
-                                  incx,
-                                  stride_x,
-                                  C,
-                                  offset_c,
-                                  ldc,
-                                  stride_c);
-        }
+        ROCBLAS_LAUNCH_KERNEL((rocblas_dgmm_device<DGMM_DIM_X, DGMM_DIM_Y, false>),
+                              dgmm_grid,
+                              dgmm_threads,
+                              0,
+                              rocblas_stream,
+                              m,
+                              n,
+                              A,
+                              offset_a,
+                              lda,
+                              stride_a,
+                              X,
+                              shift_x,
+                              incx,
+                              stride_x,
+                              C,
+                              offset_c,
+                              ldc,
+                              stride_c,
+                              batch_count);
     }
+    else
+    {
+        ROCBLAS_LAUNCH_KERNEL((rocblas_dgmm_device<DGMM_DIM_X, DGMM_DIM_Y, true>),
+                              dgmm_grid,
+                              dgmm_threads,
+                              0,
+                              rocblas_stream,
+                              m,
+                              n,
+                              A,
+                              offset_a,
+                              lda,
+                              stride_a,
+                              X,
+                              shift_x,
+                              incx,
+                              stride_x,
+                              C,
+                              offset_c,
+                              ldc,
+                              stride_c,
+                              batch_count);
+    }
+
     return rocblas_status_success;
 }
 
@@ -163,18 +179,18 @@ template <typename TConstPtr, typename TPtr>
 rocblas_status rocblas_dgmm_check_numerics(const char*    function_name,
                                            rocblas_handle handle,
                                            rocblas_side   side,
-                                           rocblas_int    m,
-                                           rocblas_int    n,
+                                           int64_t        m,
+                                           int64_t        n,
                                            TConstPtr      A,
-                                           rocblas_int    lda,
+                                           int64_t        lda,
                                            rocblas_stride stride_a,
                                            TConstPtr      x,
-                                           rocblas_int    incx,
+                                           int64_t        incx,
                                            rocblas_stride stride_x,
                                            TPtr           C,
-                                           rocblas_int    ldc,
+                                           int64_t        ldc,
                                            rocblas_stride stride_c,
-                                           rocblas_int    batch_count,
+                                           int64_t        batch_count,
                                            const int      check_numerics,
                                            bool           is_input)
 {
@@ -236,80 +252,77 @@ rocblas_status rocblas_dgmm_check_numerics(const char*    function_name,
 // Instantiations below will need to be manually updated to match any change in
 // template parameters in the files dgmm*.cpp
 
-// clang-format off
-#ifdef INSTANTIATE_DGMM_TEMPLATE
-#error INSTANTIATE_DGMM_TEMPLATE already defined
+#ifdef INSTANTIATE_DGMM_LAUNCHER
+#error INSTANTIATE_DGMM_LAUNCHER already defined
 #endif
 
-#define INSTANTIATE_DGMM_TEMPLATE(TConstPtr_, TPtr_)              \
-template rocblas_status rocblas_dgmm_template<TConstPtr_, TPtr_>  \
-                                    (rocblas_handle handle,       \
-                                     rocblas_side   side,         \
-                                     rocblas_int    m,            \
-                                     rocblas_int    n,            \
-                                     TConstPtr_     A,            \
-                                     rocblas_stride offset_a,     \
-                                     rocblas_int    lda,          \
-                                     rocblas_stride stride_a,     \
-                                     TConstPtr_     X,            \
-                                     rocblas_stride offset_x,     \
-                                     rocblas_int    incx,         \
-                                     rocblas_stride stride_x,     \
-                                     TPtr_          C,            \
-                                     rocblas_stride offset_c,     \
-                                     rocblas_int    ldc,          \
-                                     rocblas_stride stride_c,     \
-                                     rocblas_int    batch_count);
+#define INSTANTIATE_DGMM_LAUNCHER(TConstPtr_, TPtr_)                           \
+    template rocblas_status rocblas_internal_dgmm_launcher<TConstPtr_, TPtr_>( \
+        rocblas_handle handle,                                                 \
+        rocblas_side   side,                                                   \
+        rocblas_int    m,                                                      \
+        rocblas_int    n,                                                      \
+        TConstPtr_     A,                                                      \
+        rocblas_stride offset_a,                                               \
+        int64_t        lda,                                                    \
+        rocblas_stride stride_a,                                               \
+        TConstPtr_     X,                                                      \
+        rocblas_stride offset_x,                                               \
+        int64_t        incx,                                                   \
+        rocblas_stride stride_x,                                               \
+        TPtr_          C,                                                      \
+        rocblas_stride offset_c,                                               \
+        int64_t        ldc,                                                    \
+        rocblas_stride stride_c,                                               \
+        rocblas_int    batch_count);
 
 // instantiate for rocblas_Xdgmm and rocblas_Xdgmm_strided_batched
-INSTANTIATE_DGMM_TEMPLATE( float const*,  float*)
-INSTANTIATE_DGMM_TEMPLATE(double const*, double*)
-INSTANTIATE_DGMM_TEMPLATE( rocblas_float_complex const*,  rocblas_float_complex*)
-INSTANTIATE_DGMM_TEMPLATE(rocblas_double_complex const*, rocblas_double_complex*)
+INSTANTIATE_DGMM_LAUNCHER(float const*, float*)
+INSTANTIATE_DGMM_LAUNCHER(double const*, double*)
+INSTANTIATE_DGMM_LAUNCHER(rocblas_float_complex const*, rocblas_float_complex*)
+INSTANTIATE_DGMM_LAUNCHER(rocblas_double_complex const*, rocblas_double_complex*)
 
 // instantiate for rocblas_Xdgmm_batched
-INSTANTIATE_DGMM_TEMPLATE( float const* const*,  float* const*)
-INSTANTIATE_DGMM_TEMPLATE(double const* const*, double* const*)
-INSTANTIATE_DGMM_TEMPLATE( rocblas_float_complex const* const*,  rocblas_float_complex* const*)
-INSTANTIATE_DGMM_TEMPLATE(rocblas_double_complex const* const*, rocblas_double_complex* const*)
-#undef INSTANTIATE_DGMM_TEMPLATE
-
+INSTANTIATE_DGMM_LAUNCHER(float const* const*, float* const*)
+INSTANTIATE_DGMM_LAUNCHER(double const* const*, double* const*)
+INSTANTIATE_DGMM_LAUNCHER(rocblas_float_complex const* const*, rocblas_float_complex* const*)
+INSTANTIATE_DGMM_LAUNCHER(rocblas_double_complex const* const*, rocblas_double_complex* const*)
+#undef INSTANTIATE_DGMM_LAUNCHER
 
 #ifdef INSTANTIATE_DGMM_NUMERICS
 #error INSTANTIATE_DGMM_NUMERICS already defined
 #endif
 
-#define INSTANTIATE_DGMM_NUMERICS(TConstPtr_, TPtr_)                         \
-template rocblas_status rocblas_dgmm_check_numerics<TConstPtr_, TPtr_>       \
-                                          (const char*       function_name,  \
-                                           rocblas_handle    handle,         \
-                                           rocblas_side   side,              \
-                                           rocblas_int       m,              \
-                                           rocblas_int       n,              \
-                                           TConstPtr_        A,              \
-                                           rocblas_int       lda,            \
-                                           rocblas_stride    stride_a,       \
-                                           TConstPtr_        x,              \
-                                           rocblas_int       inc,            \
-                                           rocblas_stride    stride_x,       \
-                                           TPtr_             C,              \
-                                           rocblas_int       ldc,            \
-                                           rocblas_stride    stride_c,       \
-                                           rocblas_int       batch_count,    \
-                                           const int         check_numerics, \
-                                           bool              is_input);
+#define INSTANTIATE_DGMM_NUMERICS(TConstPtr_, TPtr_)                        \
+    template rocblas_status rocblas_dgmm_check_numerics<TConstPtr_, TPtr_>( \
+        const char*    function_name,                                       \
+        rocblas_handle handle,                                              \
+        rocblas_side   side,                                                \
+        int64_t        m,                                                   \
+        int64_t        n,                                                   \
+        TConstPtr_     A,                                                   \
+        int64_t        lda,                                                 \
+        rocblas_stride stride_a,                                            \
+        TConstPtr_     x,                                                   \
+        int64_t        inc,                                                 \
+        rocblas_stride stride_x,                                            \
+        TPtr_          C,                                                   \
+        int64_t        ldc,                                                 \
+        rocblas_stride stride_c,                                            \
+        int64_t        batch_count,                                         \
+        const int      check_numerics,                                      \
+        bool           is_input);
 
 // instantiate for rocblas_Xdgmm and rocblas_Xdgmm_strided_batched
-INSTANTIATE_DGMM_NUMERICS(float const*,  float*)
+INSTANTIATE_DGMM_NUMERICS(float const*, float*)
 INSTANTIATE_DGMM_NUMERICS(double const*, double*)
-INSTANTIATE_DGMM_NUMERICS(rocblas_float_complex const*,  rocblas_float_complex*)
+INSTANTIATE_DGMM_NUMERICS(rocblas_float_complex const*, rocblas_float_complex*)
 INSTANTIATE_DGMM_NUMERICS(rocblas_double_complex const*, rocblas_double_complex*)
 
 // instantiate for rocblas_Xdgmm_batched
 INSTANTIATE_DGMM_NUMERICS(float const* const*, float* const*)
 INSTANTIATE_DGMM_NUMERICS(double const* const*, double* const*)
-INSTANTIATE_DGMM_NUMERICS(rocblas_float_complex const* const*,  rocblas_float_complex* const*)
+INSTANTIATE_DGMM_NUMERICS(rocblas_float_complex const* const*, rocblas_float_complex* const*)
 INSTANTIATE_DGMM_NUMERICS(rocblas_double_complex const* const*, rocblas_double_complex* const*)
 
 #undef INSTANTIATE_DGMM_NUMERICS
-// clang-format on

@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2024 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2018-2025 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -28,9 +28,9 @@
 template <typename T>
 void testing_gbmv_bad_arg(const Arguments& arg)
 {
-    auto rocblas_gbmv_fn = arg.api == FORTRAN ? rocblas_gbmv<T, true> : rocblas_gbmv<T, false>;
+    auto rocblas_gbmv_fn = arg.api & c_API_FORTRAN ? rocblas_gbmv<T, true> : rocblas_gbmv<T, false>;
     auto rocblas_gbmv_fn_64
-        = arg.api == FORTRAN_64 ? rocblas_gbmv_64<T, true> : rocblas_gbmv_64<T, false>;
+        = arg.api & c_API_FORTRAN ? rocblas_gbmv_64<T, true> : rocblas_gbmv_64<T, false>;
 
     for(auto pointer_mode : {rocblas_pointer_mode_host, rocblas_pointer_mode_device})
     {
@@ -46,7 +46,10 @@ void testing_gbmv_bad_arg(const Arguments& arg)
         const int64_t           incx   = 1;
         const int64_t           incy   = 1;
 
-        device_vector<T> alpha_d(1), beta_d(1), one_d(1), zero_d(1);
+        DEVICE_MEMCHECK(device_vector<T>, alpha_d, (1));
+        DEVICE_MEMCHECK(device_vector<T>, beta_d, (1));
+        DEVICE_MEMCHECK(device_vector<T>, one_d, (1));
+        DEVICE_MEMCHECK(device_vector<T>, zero_d, (1));
 
         const T alpha_h(1), beta_h(2), one_h(1), zero_h(0);
 
@@ -70,14 +73,9 @@ void testing_gbmv_bad_arg(const Arguments& arg)
         int64_t banded_matrix_row = KL + KU + 1;
 
         // Allocate device memory
-        device_matrix<T> dAb(banded_matrix_row, N, lda);
-        device_vector<T> dx(N, incx);
-        device_vector<T> dy(M, incy);
-
-        // Check device memory allocation
-        CHECK_DEVICE_ALLOCATION(dAb.memcheck());
-        CHECK_DEVICE_ALLOCATION(dx.memcheck());
-        CHECK_DEVICE_ALLOCATION(dy.memcheck());
+        DEVICE_MEMCHECK(device_matrix<T>, dAb, (banded_matrix_row, N, lda));
+        DEVICE_MEMCHECK(device_vector<T>, dx, (N, incx));
+        DEVICE_MEMCHECK(device_vector<T>, dy, (M, incy));
 
         DAPI_EXPECT(rocblas_status_invalid_handle,
                     rocblas_gbmv_fn,
@@ -184,9 +182,9 @@ void testing_gbmv_bad_arg(const Arguments& arg)
 template <typename T>
 void testing_gbmv(const Arguments& arg)
 {
-    auto rocblas_gbmv_fn = arg.api == FORTRAN ? rocblas_gbmv<T, true> : rocblas_gbmv<T, false>;
+    auto rocblas_gbmv_fn = arg.api & c_API_FORTRAN ? rocblas_gbmv<T, true> : rocblas_gbmv<T, false>;
     auto rocblas_gbmv_fn_64
-        = arg.api == FORTRAN_64 ? rocblas_gbmv_64<T, true> : rocblas_gbmv_64<T, false>;
+        = arg.api & c_API_FORTRAN ? rocblas_gbmv_64<T, true> : rocblas_gbmv_64<T, false>;
 
     int64_t           M                 = arg.M;
     int64_t           N                 = arg.N;
@@ -242,28 +240,21 @@ void testing_gbmv(const Arguments& arg)
 
     // Naming: `h` is in CPU (host) memory(eg hAb), `d` is in GPU (device) memory (eg dAb).
     // Allocate host memory
-    host_matrix<T> hAb(banded_matrix_row, N, lda);
-    host_vector<T> hx(dim_x, incx);
-    host_vector<T> hy(dim_y, incy);
-    host_vector<T> hy_gold(dim_y, incy);
-    host_vector<T> halpha(1);
-    host_vector<T> hbeta(1);
+    HOST_MEMCHECK(host_matrix<T>, hAb, (banded_matrix_row, N, lda));
+    HOST_MEMCHECK(host_vector<T>, hx, (dim_x, incx));
+    HOST_MEMCHECK(host_vector<T>, hy, (dim_y, incy));
+    HOST_MEMCHECK(host_vector<T>, hy_gold, (dim_y, incy));
+    HOST_MEMCHECK(host_vector<T>, halpha, (1));
+    HOST_MEMCHECK(host_vector<T>, hbeta, (1));
     halpha[0] = h_alpha;
     hbeta[0]  = h_beta;
 
     // Allocate device memory
-    device_matrix<T> dAb(banded_matrix_row, N, lda);
-    device_vector<T> dx(dim_x, incx);
-    device_vector<T> dy(dim_y, incy);
-    device_vector<T> d_alpha(1);
-    device_vector<T> d_beta(1);
-
-    // Check device memory allocation
-    CHECK_DEVICE_ALLOCATION(dAb.memcheck());
-    CHECK_DEVICE_ALLOCATION(dx.memcheck());
-    CHECK_DEVICE_ALLOCATION(dy.memcheck());
-    CHECK_DEVICE_ALLOCATION(d_alpha.memcheck());
-    CHECK_DEVICE_ALLOCATION(d_beta.memcheck());
+    DEVICE_MEMCHECK(device_matrix<T>, dAb, (banded_matrix_row, N, lda));
+    DEVICE_MEMCHECK(device_vector<T>, dx, (dim_x, incx));
+    DEVICE_MEMCHECK(device_vector<T>, dy, (dim_y, incy));
+    DEVICE_MEMCHECK(device_vector<T>, d_alpha, (1));
+    DEVICE_MEMCHECK(device_vector<T>, d_beta, (1));
 
     // Initialize data on host memory
     rocblas_init_matrix(
@@ -315,31 +306,60 @@ void testing_gbmv(const Arguments& arg)
 
             if(arg.repeatability_check)
             {
-                host_vector<T> hy_copy(dim_y, incy);
-                CHECK_HIP_ERROR(hy_copy.memcheck());
+                HOST_MEMCHECK(host_vector<T>, hy_copy, (dim_y, incy));
                 // copy output from device to CPU
                 hy.transfer_from(dy);
-                for(int i = 0; i < arg.iters; i++)
+
+                // multi-GPU support
+                int device_id, device_count;
+                CHECK_HIP_ERROR(limit_device_count(device_count, (int)arg.devices));
+
+                for(int dev_id = 0; dev_id < device_count; dev_id++)
                 {
-                    dy.transfer_from(hy_gold);
-                    DAPI_CHECK(rocblas_gbmv_fn,
-                               (handle,
-                                transA,
-                                M,
-                                N,
-                                KL,
-                                KU,
-                                d_alpha,
-                                dAb,
-                                lda,
-                                dx,
-                                incx,
-                                d_beta,
-                                dy,
-                                incy));
-                    // copy output from device to CPU
-                    hy_copy.transfer_from(dy);
-                    unit_check_general<T>(1, dim_y, incy, hy, hy_copy);
+                    CHECK_HIP_ERROR(hipGetDevice(&device_id));
+                    if(device_id != dev_id)
+                        CHECK_HIP_ERROR(hipSetDevice(dev_id));
+
+                    //New rocblas handle for new device
+                    rocblas_local_handle handle_copy{arg};
+
+                    // Allocate device memory
+                    DEVICE_MEMCHECK(device_matrix<T>, dAb_copy, (banded_matrix_row, N, lda));
+                    DEVICE_MEMCHECK(device_vector<T>, dx_copy, (dim_x, incx));
+                    DEVICE_MEMCHECK(device_vector<T>, dy_copy, (dim_y, incy));
+                    DEVICE_MEMCHECK(device_vector<T>, d_alpha_copy, (1));
+                    DEVICE_MEMCHECK(device_vector<T>, d_beta_copy, (1));
+
+                    dAb_copy.transfer_from(hAb);
+                    dx_copy.transfer_from(hx);
+                    d_alpha_copy.transfer_from(halpha);
+                    d_beta_copy.transfer_from(hbeta);
+
+                    CHECK_ROCBLAS_ERROR(
+                        rocblas_set_pointer_mode(handle_copy, rocblas_pointer_mode_device));
+
+                    for(int runs = 0; runs < arg.iters; runs++)
+                    {
+                        dy_copy.transfer_from(hy_gold);
+                        DAPI_CHECK(rocblas_gbmv_fn,
+                                   (handle_copy,
+                                    transA,
+                                    M,
+                                    N,
+                                    KL,
+                                    KU,
+                                    d_alpha_copy,
+                                    dAb_copy,
+                                    lda,
+                                    dx_copy,
+                                    incx,
+                                    d_beta_copy,
+                                    dy_copy,
+                                    incy));
+                        // copy output from device to CPU
+                        hy_copy.transfer_from(dy_copy);
+                        unit_check_general<T>(1, dim_y, incy, hy, hy_copy);
+                    }
                 }
                 return;
             }

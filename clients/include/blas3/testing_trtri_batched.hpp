@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2024 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2018-2025 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -23,6 +23,7 @@
 #pragma once
 
 #include "cblas_interface.hpp"
+#include "client_utility.hpp"
 #include "flops.hpp"
 #include "near.hpp"
 #include "norm.hpp"
@@ -34,15 +35,14 @@
 #include "rocblas_test.hpp"
 #include "rocblas_vector.hpp"
 #include "unit.hpp"
-#include "utility.hpp"
 
 #include "blas3/rocblas_trtri.hpp"
 
 template <typename T>
 void testing_trtri_batched_bad_arg(const Arguments& arg)
 {
-    auto rocblas_trtri_batched_fn
-        = arg.api == FORTRAN ? rocblas_trtri_batched<T, true> : rocblas_trtri_batched<T, false>;
+    auto rocblas_trtri_batched_fn = arg.api & c_API_FORTRAN ? rocblas_trtri_batched<T, true>
+                                                            : rocblas_trtri_batched<T, false>;
 
     rocblas_local_handle handle{arg};
 
@@ -54,12 +54,8 @@ void testing_trtri_batched_bad_arg(const Arguments& arg)
     const rocblas_diagonal diag = rocblas_diagonal_non_unit;
 
     // Allocate device memory
-    device_batch_matrix<T> dA(N, N, lda, batch_count);
-    device_batch_matrix<T> dinvA(N, N, lda, batch_count);
-
-    // Check device memory allocation
-    CHECK_DEVICE_ALLOCATION(dA.memcheck());
-    CHECK_DEVICE_ALLOCATION(dinvA.memcheck());
+    DEVICE_MEMCHECK(device_batch_matrix<T>, dA, (N, N, lda, batch_count));
+    DEVICE_MEMCHECK(device_batch_matrix<T>, dinvA, (N, N, lda, batch_count));
 
     EXPECT_ROCBLAS_STATUS(rocblas_trtri_batched_fn(handle,
                                                    rocblas_fill_full,
@@ -158,8 +154,8 @@ void testing_trtri_batched_bad_arg(const Arguments& arg)
 template <typename T>
 void testing_trtri_batched(const Arguments& arg)
 {
-    auto rocblas_trtri_batched_fn
-        = arg.api == FORTRAN ? rocblas_trtri_batched<T, true> : rocblas_trtri_batched<T, false>;
+    auto rocblas_trtri_batched_fn = arg.api & c_API_FORTRAN ? rocblas_trtri_batched<T, true>
+                                                            : rocblas_trtri_batched<T, false>;
 
     rocblas_int N           = arg.N;
     rocblas_int lda         = arg.lda;
@@ -191,21 +187,13 @@ void testing_trtri_batched(const Arguments& arg)
 
     // Naming: `h` is in CPU (host) memory(eg hA), `d` is in GPU (device) memory (eg dA).
     // Allocate host memory
-    host_batch_matrix<T> hA(N, N, lda, batch_count);
-    host_batch_matrix<T> hB(N, N, lda, batch_count);
-    host_batch_matrix<T> hA_2(N, N, lda, batch_count);
-
-    // Check host memory allocation
-    CHECK_HIP_ERROR(hA.memcheck());
-    CHECK_HIP_ERROR(hB.memcheck());
+    HOST_MEMCHECK(host_batch_matrix<T>, hA, (N, N, lda, batch_count));
+    HOST_MEMCHECK(host_batch_matrix<T>, hB, (N, N, lda, batch_count));
+    HOST_MEMCHECK(host_batch_matrix<T>, hA_2, (N, N, lda, batch_count));
 
     // Allocate device memory
-    device_batch_matrix<T> dA(N, N, lda, batch_count, false, offsetA);
-    device_batch_matrix<T> dinvA(N, N, lda, batch_count, false, offsetinvA);
-
-    // Check device memory allocation
-    CHECK_DEVICE_ALLOCATION(dA.memcheck());
-    CHECK_DEVICE_ALLOCATION(dinvA.memcheck());
+    DEVICE_MEMCHECK(device_batch_matrix<T>, dA, (N, N, lda, batch_count, false, offsetA));
+    DEVICE_MEMCHECK(device_batch_matrix<T>, dinvA, (N, N, lda, batch_count, false, offsetinvA));
 
     // Initial Data on CPU
     //Explicitly set the unused side of matrix `hA` to 0 when using it for temp storage.
@@ -292,22 +280,45 @@ void testing_trtri_batched(const Arguments& arg)
                                                          batch_count));
             if(arg.repeatability_check)
             {
-                host_batch_matrix<T> hA_copy(N, N, lda, batch_count);
+                HOST_MEMCHECK(host_batch_matrix<T>, hA_copy, (N, N, lda, batch_count));
                 CHECK_HIP_ERROR(hA.transfer_from(dinvA));
 
-                for(int i = 0; i < arg.iters; i++)
+                // multi-GPU support
+                int device_id, device_count;
+                CHECK_HIP_ERROR(limit_device_count(device_count, (int)arg.devices));
+
+                for(int dev_id = 0; dev_id < device_count; dev_id++)
                 {
-                    CHECK_ROCBLAS_ERROR(rocblas_trtri_batched_fn(handle,
-                                                                 uplo,
-                                                                 diag,
-                                                                 N,
-                                                                 dA.ptr_on_device(),
-                                                                 lda,
-                                                                 dinvA.ptr_on_device(),
-                                                                 lda,
-                                                                 batch_count));
-                    CHECK_HIP_ERROR(hA_copy.transfer_from(dinvA));
-                    unit_check_general<T>(N, N, lda, hA, hA_copy, batch_count);
+                    CHECK_HIP_ERROR(hipGetDevice(&device_id));
+                    if(device_id != dev_id)
+                        CHECK_HIP_ERROR(hipSetDevice(dev_id));
+
+                    //New rocblas handle for new device
+                    rocblas_local_handle handle_copy{arg};
+
+                    //Allocate device memory in new device
+                    DEVICE_MEMCHECK(
+                        device_batch_matrix<T>, dA_copy, (N, N, lda, batch_count, false, offsetA));
+                    DEVICE_MEMCHECK(device_batch_matrix<T>,
+                                    dinvA_copy,
+                                    (N, N, lda, batch_count, false, offsetinvA));
+
+                    for(int runs = 0; runs < arg.iters; runs++)
+                    {
+                        CHECK_HIP_ERROR(dA_copy.transfer_from(hB));
+                        CHECK_HIP_ERROR(dinvA_copy.transfer_from(hB));
+                        CHECK_ROCBLAS_ERROR(rocblas_trtri_batched_fn(handle_copy,
+                                                                     uplo,
+                                                                     diag,
+                                                                     N,
+                                                                     dA_copy.ptr_on_device(),
+                                                                     lda,
+                                                                     dinvA_copy.ptr_on_device(),
+                                                                     lda,
+                                                                     batch_count));
+                        CHECK_HIP_ERROR(hA_copy.transfer_from(dinvA_copy));
+                        unit_check_general<T>(N, N, lda, hA, hA_copy, batch_count);
+                    }
                 }
                 return;
             }
@@ -319,8 +330,8 @@ void testing_trtri_batched(const Arguments& arg)
             rocblas_stride subStride       = 0;
             rocblas_int    sub_batch_count = 1;
 
-            size_t                 work_el = rocblas_internal_trtri_temp_elements(N, batch_count);
-            device_batch_vector<T> workspace_arr(work_el, 1, batch_count);
+            size_t work_el = rocblas_internal_trtri_temp_elements(N, batch_count);
+            DEVICE_MEMCHECK(device_batch_vector<T>, workspace_arr, (work_el, 1, batch_count));
 
             CHECK_ROCBLAS_ERROR(
                 rocblas_internal_trtri_batched_template(handle,
@@ -363,8 +374,8 @@ void testing_trtri_batched(const Arguments& arg)
             rocblas_stride subStride       = 0;
             rocblas_int    sub_batch_count = 1;
 
-            size_t                 work_el = rocblas_internal_trtri_temp_elements(N, batch_count);
-            device_batch_vector<T> workspace_arr(work_el, 1, batch_count);
+            size_t work_el = rocblas_internal_trtri_temp_elements(N, batch_count);
+            DEVICE_MEMCHECK(device_batch_vector<T>, workspace_arr, (work_el, 1, batch_count));
 
             CHECK_ROCBLAS_ERROR(
                 rocblas_internal_trtri_batched_template(handle,

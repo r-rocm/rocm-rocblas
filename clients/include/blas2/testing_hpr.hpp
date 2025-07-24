@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2024 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2018-2025 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -27,9 +27,9 @@
 template <typename T>
 void testing_hpr_bad_arg(const Arguments& arg)
 {
-    auto rocblas_hpr_fn = arg.api == FORTRAN ? rocblas_hpr<T, true> : rocblas_hpr<T, false>;
+    auto rocblas_hpr_fn = arg.api & c_API_FORTRAN ? rocblas_hpr<T, true> : rocblas_hpr<T, false>;
     auto rocblas_hpr_fn_64
-        = arg.api == FORTRAN_64 ? rocblas_hpr_64<T, true> : rocblas_hpr_64<T, false>;
+        = arg.api & c_API_FORTRAN ? rocblas_hpr_64<T, true> : rocblas_hpr_64<T, false>;
 
     for(auto pointer_mode : {rocblas_pointer_mode_host, rocblas_pointer_mode_device})
     {
@@ -42,7 +42,8 @@ void testing_hpr_bad_arg(const Arguments& arg)
 
         using U = real_t<T>;
 
-        device_vector<U> alpha_d(1), zero_d(1);
+        DEVICE_MEMCHECK(device_vector<U>, alpha_d, (1));
+        DEVICE_MEMCHECK(device_vector<U>, zero_d, (1));
 
         const U alpha_h(1), zero_h(0);
 
@@ -58,12 +59,8 @@ void testing_hpr_bad_arg(const Arguments& arg)
         }
 
         // Allocate device memory
-        device_matrix<T> dAp(1, rocblas_packed_matrix_size(N), 1);
-        device_vector<T> dx(N, incx);
-
-        // Check device memory allocation
-        CHECK_DEVICE_ALLOCATION(dAp.memcheck());
-        CHECK_DEVICE_ALLOCATION(dx.memcheck());
+        DEVICE_MEMCHECK(device_matrix<T>, dAp, (1, rocblas_packed_matrix_size(N), 1));
+        DEVICE_MEMCHECK(device_vector<T>, dx, (N, incx));
 
         DAPI_EXPECT(rocblas_status_invalid_handle,
                     rocblas_hpr_fn,
@@ -99,9 +96,9 @@ void testing_hpr_bad_arg(const Arguments& arg)
 template <typename T>
 void testing_hpr(const Arguments& arg)
 {
-    auto rocblas_hpr_fn = arg.api == FORTRAN ? rocblas_hpr<T, true> : rocblas_hpr<T, false>;
+    auto rocblas_hpr_fn = arg.api & c_API_FORTRAN ? rocblas_hpr<T, true> : rocblas_hpr<T, false>;
     auto rocblas_hpr_fn_64
-        = arg.api == FORTRAN_64 ? rocblas_hpr_64<T, true> : rocblas_hpr_64<T, false>;
+        = arg.api & c_API_FORTRAN ? rocblas_hpr_64<T, true> : rocblas_hpr_64<T, false>;
 
     int64_t              N       = arg.N;
     int64_t              incx    = arg.incx;
@@ -123,23 +120,18 @@ void testing_hpr(const Arguments& arg)
 
     // Naming: `h` is in CPU (host) memory(eg hAp), `d` is in GPU (device) memory (eg dAp).
     // Allocate host memory
-    host_matrix<T>         hA(N, N, N);
-    host_matrix<T>         hAp(1, size_A, 1);
-    host_matrix<T>         hAp_gold(1, size_A, 1);
-    host_vector<T>         hx(N, incx);
-    host_vector<real_t<T>> halpha(1);
+    HOST_MEMCHECK(host_matrix<T>, hA, (N, N, N));
+    HOST_MEMCHECK(host_matrix<T>, hAp, (1, size_A, 1));
+    HOST_MEMCHECK(host_matrix<T>, hAp_gold, (1, size_A, 1));
+    HOST_MEMCHECK(host_vector<T>, hx, (N, incx));
+    HOST_MEMCHECK(host_vector<real_t<T>>, halpha, (1));
 
     halpha[0] = h_alpha;
 
     // Allocate device memory
-    device_matrix<T>         dAp(1, size_A, 1);
-    device_vector<T>         dx(N, incx);
-    device_vector<real_t<T>> d_alpha(1);
-
-    // Check device memory allocation
-    CHECK_DEVICE_ALLOCATION(dAp.memcheck());
-    CHECK_DEVICE_ALLOCATION(dx.memcheck());
-    CHECK_DEVICE_ALLOCATION(d_alpha.memcheck());
+    DEVICE_MEMCHECK(device_matrix<T>, dAp, (1, size_A, 1));
+    DEVICE_MEMCHECK(device_vector<T>, dx, (N, incx));
+    DEVICE_MEMCHECK(device_vector<real_t<T>>, d_alpha, (1));
 
     // Initialize data on host memory
     rocblas_init_matrix(
@@ -186,17 +178,42 @@ void testing_hpr(const Arguments& arg)
 
             if(arg.repeatability_check)
             {
-                host_matrix<T> hAp_copy(1, size_A, 1);
-                CHECK_HIP_ERROR(hAp_copy.memcheck());
+                HOST_MEMCHECK(host_matrix<T>, hAp_copy, (1, size_A, 1));
                 CHECK_HIP_ERROR(hAp.transfer_from(dAp));
+                // multi-GPU support
+                int device_id, device_count;
+                CHECK_HIP_ERROR(limit_device_count(device_count, (int)arg.devices));
 
-                for(int i = 0; i < arg.iters; i++)
+                for(int dev_id = 0; dev_id < device_count; dev_id++)
                 {
-                    CHECK_HIP_ERROR(dAp.transfer_from(hAp_gold));
-                    CHECK_HIP_ERROR(d_alpha.transfer_from(halpha));
-                    DAPI_CHECK(rocblas_hpr_fn, (handle, uplo, N, d_alpha, dx, incx, dAp));
-                    CHECK_HIP_ERROR(hAp_copy.transfer_from(dAp));
-                    unit_check_general<T>(1, size_A, 1, hAp, hAp_copy);
+                    CHECK_HIP_ERROR(hipGetDevice(&device_id));
+                    if(device_id != dev_id)
+                        CHECK_HIP_ERROR(hipSetDevice(dev_id));
+
+                    //New rocblas handle for new device
+                    rocblas_local_handle handle_copy{arg};
+
+                    // Allocate device memory
+                    DEVICE_MEMCHECK(device_matrix<T>, dAp_copy, (1, size_A, 1));
+                    DEVICE_MEMCHECK(device_vector<T>, dx_copy, (N, incx));
+                    DEVICE_MEMCHECK(device_vector<real_t<T>>, d_alpha_copy, (1));
+
+                    // copy data from CPU to device
+                    CHECK_HIP_ERROR(dx_copy.transfer_from(hx));
+                    CHECK_HIP_ERROR(d_alpha_copy.transfer_from(halpha));
+
+                    CHECK_ROCBLAS_ERROR(
+                        rocblas_set_pointer_mode(handle_copy, rocblas_pointer_mode_device));
+
+                    for(int runs = 0; runs < arg.iters; runs++)
+                    {
+                        CHECK_HIP_ERROR(dAp_copy.transfer_from(hAp_gold));
+                        CHECK_HIP_ERROR(d_alpha_copy.transfer_from(halpha));
+                        DAPI_CHECK(rocblas_hpr_fn,
+                                   (handle_copy, uplo, N, d_alpha_copy, dx_copy, incx, dAp_copy));
+                        CHECK_HIP_ERROR(hAp_copy.transfer_from(dAp_copy));
+                        unit_check_general<T>(1, size_A, 1, hAp, hAp_copy);
+                    }
                 }
                 return;
             }

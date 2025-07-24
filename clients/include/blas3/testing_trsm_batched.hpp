@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2024 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2018-2025 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -25,6 +25,7 @@
 #include "testing_common.hpp"
 
 #include "blas3/rocblas_trsm.hpp"
+#include "src64/blas3/rocblas_trsm_64.hpp"
 
 #define ERROR_EPS_MULTIPLIER 40
 #define RESIDUAL_EPS_MULTIPLIER 40
@@ -33,9 +34,9 @@ template <typename T>
 void testing_trsm_batched_bad_arg(const Arguments& arg)
 {
     auto rocblas_trsm_batched_fn
-        = arg.api == FORTRAN ? rocblas_trsm_batched<T, true> : rocblas_trsm_batched<T, false>;
-    auto rocblas_trsm_batched_fn_64 = arg.api == FORTRAN_64 ? rocblas_trsm_batched_64<T, true>
-                                                            : rocblas_trsm_batched_64<T, false>;
+        = arg.api & c_API_FORTRAN ? rocblas_trsm_batched<T, true> : rocblas_trsm_batched<T, false>;
+    auto rocblas_trsm_batched_fn_64 = arg.api & c_API_FORTRAN ? rocblas_trsm_batched_64<T, true>
+                                                              : rocblas_trsm_batched_64<T, false>;
 
     for(auto pointer_mode : {rocblas_pointer_mode_host, rocblas_pointer_mode_device})
     {
@@ -48,7 +49,8 @@ void testing_trsm_batched_bad_arg(const Arguments& arg)
         const int64_t ldb         = 100;
         const int64_t batch_count = 2;
 
-        device_vector<T> alpha_d(1), zero_d(1);
+        DEVICE_MEMCHECK(device_vector<T>, alpha_d, (1));
+        DEVICE_MEMCHECK(device_vector<T>, zero_d, (1));
 
         const T alpha_h(1), zero_h(0);
 
@@ -71,12 +73,8 @@ void testing_trsm_batched_bad_arg(const Arguments& arg)
         int64_t K = side == rocblas_side_left ? M : N;
 
         // Allocate device memory
-        device_batch_matrix<T> dA(K, K, lda, batch_count);
-        device_batch_matrix<T> dB(M, N, ldb, batch_count);
-
-        // Check device memory allocation
-        CHECK_DEVICE_ALLOCATION(dA.memcheck());
-        CHECK_DEVICE_ALLOCATION(dB.memcheck());
+        DEVICE_MEMCHECK(device_batch_matrix<T>, dA, (K, K, lda, batch_count));
+        DEVICE_MEMCHECK(device_batch_matrix<T>, dB, (M, N, ldb, batch_count));
 
         // check for invalid enum
         DAPI_EXPECT(rocblas_status_invalid_value,
@@ -291,12 +289,75 @@ void testing_trsm_batched_bad_arg(const Arguments& arg)
 }
 
 template <typename T>
+void testing_trsm_batched_internal_interfaces(const Arguments& arg)
+{
+    // testing rocblas_internal_trsm_workspace_max_size to ensure that the sizes it gives
+    // is large enough for all/various sizes below the sizes given
+
+    int64_t M           = arg.M;
+    int64_t N           = arg.N;
+    int64_t batch_count = arg.batch_count;
+
+    rocblas_side side = char2rocblas_side(arg.side);
+
+    size_t w_x_tmp_size, w_x_tmp_arr_size, w_invA_size, w_invA_arr_size, w_x_tmp_size_backup;
+
+    CHECK_ROCBLAS_ERROR(
+        rocblas_internal_trsm_batched_workspace_max_size_64<T>(side,
+                                                               M,
+                                                               N,
+                                                               batch_count,
+                                                               &w_x_tmp_size,
+                                                               &w_x_tmp_arr_size,
+                                                               &w_invA_size,
+                                                               &w_invA_arr_size,
+                                                               &w_x_tmp_size_backup));
+
+    // test out below for various sizes below M and N
+    for(int64_t m_smaller = M; m_smaller > 0; m_smaller--)
+    {
+        for(int64_t n_smaller = N; n_smaller > 0; n_smaller--)
+        {
+            size_t w_x_tmp_size2, w_x_tmp_arr_size2, w_invA_size2, w_invA_arr_size2,
+                w_x_tmp_size_backup2;
+
+            // This is implementation-dependent, but currently we /may/ use less memory with "skinny"
+            // matrices when transA == non-transpose.
+            // Setting this to transpose will always allocate >= non-transpose invokations, so good
+            // for this test
+            rocblas_operation transA     = rocblas_operation_transpose;
+            rocblas_status    mem_status = rocblas_internal_trsm_workspace_size<T>(
+                side,
+                transA,
+                m_smaller,
+                n_smaller,
+                batch_count, // not bothering to test smaller batch_counts
+                0, // not supporting supplied invA for max_size fn
+                &w_x_tmp_size2,
+                &w_x_tmp_arr_size2,
+                &w_invA_size2,
+                &w_invA_arr_size2,
+                &w_x_tmp_size_backup2);
+
+            if(mem_status != rocblas_status_success && mem_status != rocblas_status_continue)
+                CHECK_ROCBLAS_ERROR(mem_status);
+
+#ifdef GOOGLE_TEST
+            ASSERT_TRUE(w_x_tmp_size2 <= w_x_tmp_size && w_x_tmp_arr_size2 <= w_x_tmp_arr_size
+                        && w_invA_size2 <= w_invA_size && w_invA_arr_size2 <= w_invA_arr_size
+                        && w_x_tmp_size_backup2 <= w_x_tmp_size_backup);
+#endif
+        }
+    }
+}
+
+template <typename T>
 void testing_trsm_batched(const Arguments& arg)
 {
     auto rocblas_trsm_batched_fn
-        = arg.api == FORTRAN ? rocblas_trsm_batched<T, true> : rocblas_trsm_batched<T, false>;
-    auto rocblas_trsm_batched_fn_64 = arg.api == FORTRAN_64 ? rocblas_trsm_batched_64<T, true>
-                                                            : rocblas_trsm_batched_64<T, false>;
+        = arg.api & c_API_FORTRAN ? rocblas_trsm_batched<T, true> : rocblas_trsm_batched<T, false>;
+    auto rocblas_trsm_batched_fn_64 = arg.api & c_API_FORTRAN ? rocblas_trsm_batched_64<T, true>
+                                                              : rocblas_trsm_batched_64<T, false>;
 
     int64_t M           = arg.M;
     int64_t N           = arg.N;
@@ -348,28 +409,17 @@ void testing_trsm_batched(const Arguments& arg)
 
     // Naming: `h` is in CPU (host) memory(eg hA), `d` is in GPU (device) memory (eg dA).
     // Allocate host memory
-    host_batch_matrix<T> hA(K, K, lda, batch_count);
-    host_batch_matrix<T> hB(M, N, M, batch_count); // save memory when large ldb
-    host_batch_matrix<T> hX(M, N, ldb, batch_count);
-    host_batch_matrix<T> hXorB_1(M, N, ldb, batch_count);
-    host_vector<T>       halpha(1);
+    HOST_MEMCHECK(host_batch_matrix<T>, hA, (K, K, lda, batch_count));
+    HOST_MEMCHECK(host_batch_matrix<T>, hB, (M, N, M, batch_count)); // save memory when large ldb
+    HOST_MEMCHECK(host_batch_matrix<T>, hX, (M, N, ldb, batch_count));
+    HOST_MEMCHECK(host_batch_matrix<T>, hXorB_1, (M, N, ldb, batch_count));
+    HOST_MEMCHECK(host_vector<T>, halpha, (1));
     halpha[0] = alpha_h;
 
-    // Check host memory allocation
-    CHECK_HIP_ERROR(hA.memcheck());
-    CHECK_HIP_ERROR(hB.memcheck());
-    CHECK_HIP_ERROR(hX.memcheck());
-    CHECK_HIP_ERROR(hXorB_1.memcheck());
-
     // Allocate device memory
-    device_batch_matrix<T> dA(K, K, lda, batch_count, false, offsetA);
-    device_batch_matrix<T> dXorB(M, N, ldb, batch_count, false, offsetB);
-    device_vector<T>       alpha_d(1);
-
-    // Check device memory allocation
-    CHECK_DEVICE_ALLOCATION(dA.memcheck());
-    CHECK_DEVICE_ALLOCATION(dXorB.memcheck());
-    CHECK_DEVICE_ALLOCATION(alpha_d.memcheck());
+    DEVICE_MEMCHECK(device_batch_matrix<T>, dA, (K, K, lda, batch_count, false, offsetA));
+    DEVICE_MEMCHECK(device_batch_matrix<T>, dXorB, (M, N, ldb, batch_count, false, offsetB));
+    DEVICE_MEMCHECK(device_vector<T>, alpha_d, (1));
 
     // Initialize data on host memory
     rocblas_init_matrix(hA,
@@ -483,10 +533,12 @@ void testing_trsm_batched(const Arguments& arg)
                     CHECK_ROCBLAS_ERROR(mem_status);
 
                 // allocate memory ourselves
-                device_vector<T>       w_mem_x_tmp(w_x_tmp_size / sizeof(T));
-                device_batch_vector<T> w_mem_x_tmp_arr(1, 1, w_x_tmp_arr_size / sizeof(T*));
-                device_vector<T>       w_mem_invA(w_invA_size / sizeof(T));
-                device_batch_vector<T> w_mem_invA_arr(1, 1, w_invA_arr_size / sizeof(T*));
+                DEVICE_MEMCHECK(device_vector<T>, w_mem_x_tmp, (w_x_tmp_size / sizeof(T)));
+                DEVICE_MEMCHECK(
+                    device_batch_vector<T>, w_mem_x_tmp_arr, (1, 1, w_x_tmp_arr_size / sizeof(T*)));
+                DEVICE_MEMCHECK(device_vector<T>, w_mem_invA, (w_invA_size / sizeof(T)));
+                DEVICE_MEMCHECK(
+                    device_batch_vector<T>, w_mem_invA_arr, (1, 1, w_invA_arr_size / sizeof(T*)));
 
                 rocblas_stride strideA = 0, strideB = 0;
 
@@ -586,28 +638,57 @@ void testing_trsm_batched(const Arguments& arg)
 
             if(arg.repeatability_check)
             {
-                host_batch_matrix<T> hXorB_copy(M, N, ldb, batch_count);
+                HOST_MEMCHECK(host_batch_matrix<T>, hXorB_copy, (M, N, ldb, batch_count));
 
-                for(int i = 0; i < arg.iters; i++)
+                // multi-GPU support
+                int device_id, device_count;
+                CHECK_HIP_ERROR(limit_device_count(device_count, (int)arg.devices));
+
+                for(int dev_id = 0; dev_id < device_count; dev_id++)
                 {
-                    copy_matrix_with_different_leading_dimensions(hB, hXorB_copy);
-                    CHECK_HIP_ERROR(dXorB.transfer_from(hXorB_copy));
+                    CHECK_HIP_ERROR(hipGetDevice(&device_id));
+                    if(device_id != dev_id)
+                        CHECK_HIP_ERROR(hipSetDevice(dev_id));
 
-                    CHECK_ROCBLAS_ERROR(rocblas_trsm_batched_fn(handle,
-                                                                side,
-                                                                uplo,
-                                                                transA,
-                                                                diag,
-                                                                M,
-                                                                N,
-                                                                alpha_d,
-                                                                dA.ptr_on_device(),
-                                                                lda,
-                                                                dXorB.ptr_on_device(),
-                                                                ldb,
-                                                                batch_count));
-                    CHECK_HIP_ERROR(hXorB_copy.transfer_from(dXorB));
-                    unit_check_general<T>(M, N, ldb, hXorB_1, hXorB_copy, batch_count);
+                    //New rocblas handle for new device
+                    rocblas_local_handle handle_copy{arg};
+
+                    //Allocate device memory in new device
+                    DEVICE_MEMCHECK(
+                        device_batch_matrix<T>, dA_copy, (K, K, lda, batch_count, false, offsetA));
+                    DEVICE_MEMCHECK(device_batch_matrix<T>,
+                                    dXorB_copy,
+                                    (M, N, ldb, batch_count, false, offsetB));
+                    DEVICE_MEMCHECK(device_vector<T>, alpha_d_copy, (1));
+
+                    // copy data from CPU to device
+                    CHECK_HIP_ERROR(dA_copy.transfer_from(hA));
+                    CHECK_HIP_ERROR(alpha_d_copy.transfer_from(halpha));
+
+                    CHECK_ROCBLAS_ERROR(
+                        rocblas_set_pointer_mode(handle_copy, rocblas_pointer_mode_device));
+
+                    for(int runs = 0; runs < arg.iters; runs++)
+                    {
+                        copy_matrix_with_different_leading_dimensions(hB, hXorB_copy);
+                        CHECK_HIP_ERROR(dXorB_copy.transfer_from(hXorB_copy));
+
+                        CHECK_ROCBLAS_ERROR(rocblas_trsm_batched_fn(handle_copy,
+                                                                    side,
+                                                                    uplo,
+                                                                    transA,
+                                                                    diag,
+                                                                    M,
+                                                                    N,
+                                                                    alpha_d_copy,
+                                                                    dA_copy.ptr_on_device(),
+                                                                    lda,
+                                                                    dXorB_copy.ptr_on_device(),
+                                                                    ldb,
+                                                                    batch_count));
+                        CHECK_HIP_ERROR(hXorB_copy.transfer_from(dXorB_copy));
+                        unit_check_general<T>(M, N, ldb, hXorB_1, hXorB_copy, batch_count);
+                    }
                 }
                 return;
             }

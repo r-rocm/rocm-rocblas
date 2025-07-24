@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Copyright (C) 2021-2023 Advanced Micro Devices, Inc. All rights reserved.
+"""Copyright (C) 2021-2024 Advanced Micro Devices, Inc. All rights reserved.
 
    Permission is hereby granted, free of charge, to any person obtaining a copy
    of this software and associated documentation files (the "Software"), to deal
@@ -47,8 +47,12 @@ def parse_args():
     parser = argparse.ArgumentParser(description="""
     Checks build arguments
     """)
-    parser.add_argument('-t', '--test', required=True,
-                        help='Test set to run from rtest.xml (required, e.g. osdb)')
+    parser.add_argument(      '--ci_labels', type=str, required=False, default="",
+                    help='Semi-colon seperated list of labels that may modify test runs (optional, e.g. "gfx12;TestLevel1Only")')
+    parser.add_argument('-e', '--emulation', type=str, required=False,
+                        help='Emulation test set to run from rtest.xml (e.g. smoke, regression, extended')
+    parser.add_argument('-t', '--test', required=False,
+                        help='Test set to run from rtest.xml (e.g. osdb)')
     parser.add_argument('-g', '--debug', required=False, default=False,  action='store_true',
                         help='Test Debug build (optional, default: false)')
     parser.add_argument('-o', '--output', type=str, required=False, default="xml",
@@ -166,6 +170,34 @@ def time_stop(start, pid):
             stop = 0
         time.sleep(0)
 
+def gfilter_subset(filter, groups) -> str:
+    new_filter = ""
+    patterns = ["nightly"] if "nightly" in filter else ["quick", "pre_checkin"]
+    for i in groups:
+        for j in patterns:
+            new_filter += f'*{i}*{j}*:'
+    return new_filter
+
+def label_modifiers(cmd, labels) -> str:
+    processed = ["TestTensileOnly", "TestLevel3Only", "TestLevel2Only", "TestLevel1Only"]
+    overlap = [v for v in processed if v in labels]
+    if len(overlap):
+        tok = " --gtest_filter="
+        cmd = cmd.split(tok)[0] + tok
+    else:
+        return cmd
+
+    filter = ""
+    if "TestTensileOnly" in overlap:
+        filter += gfilter_subset( cmd, ["blas3_tensile", "blas2_tensile"] )
+    if "TestLevel3Only" in overlap:
+        filter += gfilter_subset( cmd, ["blas3"] )
+    if "TestLevel2Only" in overlap:
+        filter += gfilter_subset( cmd, ["blas2"] )
+    if "TestLevel1Only" in overlap:
+        filter += gfilter_subset( cmd, ["blas1"] )
+    return cmd + f"'{filter}'"
+
 def run_cmd(cmd, test = False, time_limit = 0):
     global args
     global test_proc, timer_thread
@@ -270,6 +302,8 @@ def batch(script, xml):
 
                         raw_cmd = run.firstChild.data
                         var_cmd = raw_cmd.format_map(var_subs)
+                        if args.ci_labels:
+                            var_cmd = label_modifiers(var_cmd, args.ci_labels.split(';'))
                         error = run_cmd(var_cmd, True, timeout)
                         if (error == 2):
                             print( f'***\n*** Timed out when running: {name}\n***')
@@ -318,7 +352,14 @@ def main():
     os_detect()
     args = parse_args()
 
-    status = run_tests()
+    if args.emulation:
+        args.test = f'emulation_{args.emulation}'
+
+    if not (args.test or args.emulation):
+        print('Either -t/--test or -e/--emulation is required.')
+        args.fail_test = True
+    else:
+        status = run_tests()
 
     if args.fail_test: status = 1
 

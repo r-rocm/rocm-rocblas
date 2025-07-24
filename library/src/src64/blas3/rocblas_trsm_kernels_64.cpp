@@ -67,8 +67,9 @@ rocblas_status rocblas_internal_trsm_launcher_64(rocblas_handle    handle,
     }
 
     // may be able to call 32-bit trsm
-    if(n_64 <= c_i32_max && m_64 < c_i32_max && lda_64 < c_i32_max && ldb_64 < c_i32_max
-       && supplied_invA_size_64 < c_i32_max && batch_count_64 < c_i64_grid_YZ_chunk)
+    if(n_64 <= c_ILP64_i32_max && m_64 < c_ILP64_i32_max && lda_64 < c_ILP64_i32_max
+       && ldb_64 < c_ILP64_i32_max && supplied_invA_size_64 < c_ILP64_i32_max
+       && batch_count_64 < c_i64_grid_YZ_chunk)
         return rocblas_internal_trsm_launcher<BLOCK, DIM_X, BATCHED>(handle,
                                                                      side,
                                                                      uplo,
@@ -112,8 +113,8 @@ rocblas_status rocblas_internal_trsm_launcher_64(rocblas_handle    handle,
 
         // may be able to call 32-bit trsm while only iterating through batches. Need to be careful about
         // allocated memory and offsets between groups of kernel launches
-        if(n_64 <= c_i32_max && m_64 < c_i32_max && lda_64 < c_i32_max && ldb_64 < c_i32_max
-           && supplied_invA_size_64 < c_i32_max)
+        if(n_64 <= c_ILP64_i32_max && m_64 < c_ILP64_i32_max && lda_64 < c_ILP64_i32_max
+           && ldb_64 < c_ILP64_i32_max && supplied_invA_size_64 < c_ILP64_i32_max)
         {
             auto status
                 = rocblas_internal_trsm_launcher<BLOCK, DIM_X, BATCHED>(handle,
@@ -241,8 +242,8 @@ rocblas_status rocblas_internal_trsm_template_mem_64(rocblas_handle             
                                                      int64_t                     supplied_invA_size)
 {
     // Potentially use 32-bit trsm
-    if(n <= c_i32_max && m < c_i32_max && lda < c_i32_max && ldb < c_i32_max
-       && supplied_invA_size < c_i32_max)
+    if(n <= c_ILP64_i32_max && m < c_ILP64_i32_max && lda < c_ILP64_i32_max && ldb < c_ILP64_i32_max
+       && supplied_invA_size < c_ILP64_i32_max)
     {
         return rocblas_internal_trsm_template_mem<BATCHED, T>(
             handle,
@@ -340,8 +341,8 @@ rocblas_status rocblas_internal_trsm_workspace_size_64(rocblas_side      side,
 
     // We need lda and ldb here to see if we can use 32-bit alogrithms or not
     // Note that we don't need to check batch_count as we use multiple calls of the 32-bit kernel if it's too large
-    if(n <= c_i32_max && m < c_i32_max && lda < c_i32_max && ldb < c_i32_max
-       && supplied_invA_size < c_i32_max)
+    if(n <= c_ILP64_i32_max && m < c_ILP64_i32_max && lda < c_ILP64_i32_max && ldb < c_ILP64_i32_max
+       && supplied_invA_size < c_ILP64_i32_max)
     {
         return rocblas_internal_trsm_workspace_size<BLOCK, BATCHED, T>(
             side,
@@ -428,6 +429,170 @@ ROCBLAS_INTERNAL_EXPORT_NOINLINE rocblas_status
                                                                              w_invA_arr_size,
                                                                              w_x_tmp_size_backup);
 }
+
+/*! \brief rocblas_internal_trsm_workspace_max_size_64
+
+    Calculates the maximum needed memory allocation for trsm or trsm_strided_batched for sizes
+    where m <= M and n <= N. Does not allocate any memory.
+
+    @param[in]
+    side rocblas_side
+        Whether matrix A is located on the left or right of X
+    @param[in]
+    M int64_t
+        Number of rows of matrix B
+    @param[in]
+    N int64_t
+        Number of columns of matrix B
+    @param[in]
+    batch_count int64_t
+        Number of batches
+    @param[out]
+    w_x_tmp_size size_t
+        The bytes of workspace memory needed for x_tmp in the trsm calculations
+    @param[out]
+    w_invA_size size_t
+        The bytes of workspace memory needed for invA in the trsm calculations
+    @param[out]
+    w_x_tmp_size_backup size_t
+        If the user is unable to allocate w_x_tmp_arr_size bytes, w_x_tmp_size_backup
+        bytes may be used in trsm with degraded performance.
+    ********************************************************************/
+template <typename T>
+ROCBLAS_INTERNAL_EXPORT_NOINLINE rocblas_status
+    rocblas_internal_trsm_workspace_max_size_64(rocblas_side side,
+                                                int64_t      M,
+                                                int64_t      N,
+                                                int64_t      batch_count,
+                                                size_t*      w_x_tmp_size,
+                                                size_t*      w_invA_size,
+                                                size_t*      w_x_tmp_size_backup)
+{
+    size_t tmp_x_arr_size, tmp_inva_arr_size;
+    return rocblas_internal_trsm_workspace_max_size_64<false, T>(side,
+                                                                 M,
+                                                                 N,
+                                                                 batch_count,
+                                                                 w_x_tmp_size,
+                                                                 &tmp_x_arr_size,
+                                                                 w_invA_size,
+                                                                 &tmp_inva_arr_size,
+                                                                 w_x_tmp_size_backup);
+}
+
+template <bool BATCHED, typename T>
+rocblas_status rocblas_internal_trsm_workspace_max_size_64(rocblas_side side,
+                                                           int64_t      m,
+                                                           int64_t      n,
+                                                           int64_t      batch_count,
+                                                           size_t*      w_x_tmp_size,
+                                                           size_t*      w_x_tmp_arr_size,
+                                                           size_t*      w_invA_size,
+                                                           size_t*      w_invA_arr_size,
+                                                           size_t*      w_x_tmp_size_backup)
+{
+    if(!w_x_tmp_size || !w_x_tmp_arr_size || !w_invA_size || !w_invA_arr_size
+       || !w_x_tmp_size_backup)
+    {
+        return rocblas_status_invalid_pointer;
+    }
+
+    int64_t k  = side == rocblas_side_left ? m : n;
+    int64_t k2 = side == rocblas_side_left ? n : m;
+
+    bool is_small = (k <= 32) || (m <= 64 && n <= 64);
+
+    // if the max m and n sizes fit within this "small" criteria, all smaller sizes will also use the "small" kernel, which
+    // doesn't need any workspace memory
+    // This isn't necessarily true for the substitution method, a larger size may use subsitution while a smaller size uses
+    // inversion kernel
+    if(is_small)
+    {
+        *w_x_tmp_size        = 0;
+        *w_x_tmp_arr_size    = 0;
+        *w_invA_size         = 0;
+        *w_invA_arr_size     = 0;
+        *w_x_tmp_size_backup = 0;
+    }
+
+    int64_t x_size1 = ROCBLAS_TRSM_NB * k / 4;
+    int64_t x_size2 = ROCBLAS_TRSM_NB * ROCBLAS_TRTRI_NB * 2;
+    int64_t x_size3 = ROCBLAS_TRSM_NB * k2;
+
+    // this will usually be the largest. Many sizes, typically when divisible by ROCBLAS_TRSM_NB, don't need this much memory,
+    // but not taking that into account here
+    int64_t x_size4 = m * n;
+
+    *w_x_tmp_size = sizeof(T) * batch_count
+                    * std::max(std::max(x_size1, x_size2), std::max(x_size3, x_size4));
+    *w_x_tmp_size_backup = sizeof(T) * batch_count * std::max(x_size4, int64_t(ROCBLAS_TRSM_NB));
+
+    // temporary memory for invA
+    *w_invA_size = ROCBLAS_TRSM_NB * k * sizeof(T) * batch_count;
+
+    // if batched we need memory to hold pointers
+    *w_x_tmp_arr_size = BATCHED ? sizeof(T*) * batch_count : 0;
+    *w_invA_arr_size  = BATCHED ? sizeof(T*) * batch_count : 0;
+    return rocblas_status_success;
+}
+
+/*! \brief rocblas_internal_trsm_batched_workspace_max_size_64
+
+    Calculates the maximum needed memory allocation for trsm_batched for sizes
+    where m <= M and n <= N. Does not allocate any memory.
+
+    @param[in]
+    side rocblas_side
+        Whether matrix A is located on the left or right of X
+    @param[in]
+    M int64_t
+        Number of rows of matrix B
+    @param[in]
+    N int64_t
+        Number of columns of matrix B
+    @param[in]
+    batch_count int64_t
+        Number of batches
+    @param[out]
+    w_x_tmp_size size_t
+        The bytes of workspace memory needed for x_tmp in the trsm calculations
+    @param[out]
+    w_x_tmp_arr_size size_t
+        The bytes of workspace memory needed for the array of pointers for x_tmp
+    @param[out]
+    w_invA_size size_t
+        The bytes of workspace memory needed for invA in the trsm calculations
+    @param[out]
+    w_invA_arr_size size_t
+        The bytes of workspace memory needed for the array of pointers for invA
+    @param[out]
+    w_x_tmp_size_backup size_t
+        If the user is unable to allocate w_x_tmp_arr_size bytes, w_x_tmp_size_backup
+        bytes may be used in trsm with degraded performance.
+    ********************************************************************/
+template <typename T>
+ROCBLAS_INTERNAL_EXPORT_NOINLINE rocblas_status
+    rocblas_internal_trsm_batched_workspace_max_size_64(rocblas_side side,
+                                                        int64_t      M,
+                                                        int64_t      N,
+                                                        int64_t      batch_count,
+                                                        size_t*      w_x_tmp_size,
+                                                        size_t*      w_x_tmp_arr_size,
+                                                        size_t*      w_invA_size,
+                                                        size_t*      w_invA_arr_size,
+                                                        size_t*      w_x_tmp_size_backup)
+{
+    return rocblas_internal_trsm_workspace_max_size_64<true, T>(side,
+                                                                M,
+                                                                N,
+                                                                batch_count,
+                                                                w_x_tmp_size,
+                                                                w_x_tmp_arr_size,
+                                                                w_invA_size,
+                                                                w_invA_arr_size,
+                                                                w_x_tmp_size_backup);
+}
+
 #define TRSM_TEMPLATE_PARAMS                                                                     \
     handle, side, uplo, transA, diag, m, n, alpha, A, offset_A, lda, stride_A, B, offset_B, ldb, \
         stride_B, batch_count, optimal_mem, w_x_temp, w_x_temparr, invA, invAarr, supplied_invA, \
@@ -652,6 +817,36 @@ ROCBLAS_INTERNAL_EXPORT_NOINLINE rocblas_status
         U_      supplied_invA,                                                       \
         int64_t supplied_invA_size);
 
+#ifdef INSTANTIATE_TRSM_WORKSPACE_MAX_SIZE_TEMPLATE_64
+#error INSTANTIATE_TRSM_WORKSPACE_MAX_SIZE_TEMPLATE_64 already defined
+#endif
+
+#define INSTANTIATE_TRSM_WORKSPACE_MAX_SIZE_TEMPLATE_64(T_)                       \
+    template ROCBLAS_INTERNAL_EXPORT_NOINLINE rocblas_status                      \
+        rocblas_internal_trsm_workspace_max_size_64<T_>(rocblas_side side,        \
+                                                        int64_t      m,           \
+                                                        int64_t      n,           \
+                                                        int64_t      batch_count, \
+                                                        size_t * w_x_tmp_size,    \
+                                                        size_t * w_invA_size,     \
+                                                        size_t * w_x_tmp_size_backup);
+
+#ifdef INSTANTIATE_TRSM_BATCHED_WORKSPACE_MAX_SIZE_TEMPLATE_64
+#error INSTANTIATE_TRSM_BATCHED_WORKSPACE_MAX_SIZE_TEMPLATE_64 already defined
+#endif
+
+#define INSTANTIATE_TRSM_BATCHED_WORKSPACE_MAX_SIZE_TEMPLATE_64(T_)                        \
+    template ROCBLAS_INTERNAL_EXPORT_NOINLINE rocblas_status                               \
+        rocblas_internal_trsm_batched_workspace_max_size_64<T_>(rocblas_side side,         \
+                                                                int64_t      m,            \
+                                                                int64_t      n,            \
+                                                                int64_t      batch_count,  \
+                                                                size_t * w_x_tmp_size,     \
+                                                                size_t * w_x_tmp_arr_size, \
+                                                                size_t * w_invA_size,      \
+                                                                size_t * w_invA_arr_size,  \
+                                                                size_t * w_x_tmp_size_backup);
+
 INST_TRSM_TEMPLATE_64(int64_t, float)
 INST_TRSM_TEMPLATE_64(int64_t, double)
 INST_TRSM_TEMPLATE_64(int64_t, rocblas_float_complex)
@@ -681,3 +876,13 @@ INST_TRSM_BATCHED_WORK_SIZE_64(float)
 INST_TRSM_BATCHED_WORK_SIZE_64(double)
 INST_TRSM_BATCHED_WORK_SIZE_64(rocblas_float_complex)
 INST_TRSM_BATCHED_WORK_SIZE_64(rocblas_double_complex)
+
+INSTANTIATE_TRSM_WORKSPACE_MAX_SIZE_TEMPLATE_64(float)
+INSTANTIATE_TRSM_WORKSPACE_MAX_SIZE_TEMPLATE_64(double)
+INSTANTIATE_TRSM_WORKSPACE_MAX_SIZE_TEMPLATE_64(rocblas_float_complex)
+INSTANTIATE_TRSM_WORKSPACE_MAX_SIZE_TEMPLATE_64(rocblas_double_complex)
+
+INSTANTIATE_TRSM_BATCHED_WORKSPACE_MAX_SIZE_TEMPLATE_64(float)
+INSTANTIATE_TRSM_BATCHED_WORKSPACE_MAX_SIZE_TEMPLATE_64(double)
+INSTANTIATE_TRSM_BATCHED_WORKSPACE_MAX_SIZE_TEMPLATE_64(rocblas_float_complex)
+INSTANTIATE_TRSM_BATCHED_WORKSPACE_MAX_SIZE_TEMPLATE_64(rocblas_double_complex)

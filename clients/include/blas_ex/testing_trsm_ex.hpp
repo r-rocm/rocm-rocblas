@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2024 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2018-2025 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -22,19 +22,7 @@
 
 #pragma once
 
-#include "cblas_interface.hpp"
-#include "flops.hpp"
-#include "norm.hpp"
-#include "rocblas.hpp"
-#include "rocblas_datatype2string.hpp"
-#include "rocblas_init.hpp"
-#include "rocblas_math.hpp"
-#include "rocblas_matrix.hpp"
-#include "rocblas_random.hpp"
-#include "rocblas_test.hpp"
-#include "rocblas_vector.hpp"
-#include "unit.hpp"
-#include "utility.hpp"
+#include "testing_common.hpp"
 
 #define ERROR_EPS_MULTIPLIER 40
 #define RESIDUAL_EPS_MULTIPLIER 40
@@ -56,7 +44,7 @@ void printMatrix(const char* name, T* A, rocblas_int m, rocblas_int n, rocblas_i
 template <typename T>
 void testing_trsm_ex_bad_arg(const Arguments& arg)
 {
-    auto rocblas_trsm_ex_fn = arg.api == FORTRAN ? rocblas_trsm_ex_fortran : rocblas_trsm_ex;
+    auto rocblas_trsm_ex_fn = arg.api & c_API_FORTRAN ? rocblas_trsm_ex_fortran : rocblas_trsm_ex;
 
     for(auto pointer_mode : {rocblas_pointer_mode_host, rocblas_pointer_mode_device})
     {
@@ -68,7 +56,8 @@ void testing_trsm_ex_bad_arg(const Arguments& arg)
         const rocblas_int lda = 100;
         const rocblas_int ldb = 100;
 
-        device_vector<T> alpha_d(1), zero_d(1);
+        DEVICE_MEMCHECK(device_vector<T>, alpha_d, (1));
+        DEVICE_MEMCHECK(device_vector<T>, zero_d, (1));
 
         const T alpha_h(1), zero_h(0);
 
@@ -92,14 +81,9 @@ void testing_trsm_ex_bad_arg(const Arguments& arg)
         size_t      sizeInvA = TRSM_BLOCK * K;
 
         // Allocate device memory
-        device_matrix<T> dA(K, K, lda);
-        device_matrix<T> dB(M, N, ldb);
-        device_vector<T> dinvA(TRSM_BLOCK, TRSM_BLOCK, K);
-
-        // Check device memory allocation
-        CHECK_DEVICE_ALLOCATION(dA.memcheck());
-        CHECK_DEVICE_ALLOCATION(dB.memcheck());
-        CHECK_DEVICE_ALLOCATION(dinvA.memcheck());
+        DEVICE_MEMCHECK(device_matrix<T>, dA, (K, K, lda));
+        DEVICE_MEMCHECK(device_matrix<T>, dB, (M, N, ldb));
+        DEVICE_MEMCHECK(device_vector<T>, dinvA, (TRSM_BLOCK, TRSM_BLOCK, K));
 
         EXPECT_ROCBLAS_STATUS(rocblas_trsm_ex_fn(nullptr,
                                                  side,
@@ -249,7 +233,7 @@ void testing_trsm_ex_bad_arg(const Arguments& arg)
 template <typename T>
 void testing_trsm_ex(const Arguments& arg)
 {
-    auto rocblas_trsm_ex_fn = arg.api == FORTRAN ? rocblas_trsm_ex_fortran : rocblas_trsm_ex;
+    auto rocblas_trsm_ex_fn = arg.api & c_API_FORTRAN ? rocblas_trsm_ex_fortran : rocblas_trsm_ex;
 
     rocblas_int M   = arg.M;
     rocblas_int N   = arg.N;
@@ -299,28 +283,21 @@ void testing_trsm_ex(const Arguments& arg)
 
     // Naming: `h` is in CPU (host) memory(eg hA), `d` is in GPU (device) memory (eg dA).
     // Allocate host memory
-    host_matrix<T> hA(K, K, lda);
-    host_matrix<T> hAAT(K, K, lda);
-    host_matrix<T> hB(M, N, ldb);
-    host_matrix<T> hX(M, N, ldb);
-    host_matrix<T> hXorB_1(M, N, ldb);
-    host_matrix<T> hXorB_2(M, N, ldb);
-    host_matrix<T> cpuXorB(M, N, ldb);
-    host_matrix<T> invATemp1(TRSM_BLOCK, TRSM_BLOCK, K);
-    host_matrix<T> invATemp2(TRSM_BLOCK, TRSM_BLOCK, K);
-    host_matrix<T> hinvAI(TRSM_BLOCK, TRSM_BLOCK, K);
+    HOST_MEMCHECK(host_matrix<T>, hA, (K, K, lda));
+    HOST_MEMCHECK(host_matrix<T>, hAAT, (K, K, lda));
+    HOST_MEMCHECK(host_matrix<T>, hB, (M, N, ldb));
+    HOST_MEMCHECK(host_matrix<T>, hX, (M, N, ldb));
+    HOST_MEMCHECK(host_matrix<T>, hXorB_1, (M, N, ldb));
+    HOST_MEMCHECK(host_matrix<T>, hXorB_2, (M, N, ldb));
+    HOST_MEMCHECK(host_matrix<T>, cpuXorB, (M, N, ldb));
+    HOST_MEMCHECK(host_matrix<T>, invATemp1, (TRSM_BLOCK, TRSM_BLOCK, K));
+    HOST_MEMCHECK(host_matrix<T>, hinvAI, (TRSM_BLOCK, TRSM_BLOCK, K));
 
     // Allocate device memory
-    device_matrix<T> dA(K, K, lda);
-    device_matrix<T> dXorB(M, N, ldb);
-    device_matrix<T> dinvA(TRSM_BLOCK, TRSM_BLOCK, K);
-    device_vector<T> alpha_d(1);
-
-    // Check device memory allocation
-    CHECK_DEVICE_ALLOCATION(dA.memcheck());
-    CHECK_DEVICE_ALLOCATION(dXorB.memcheck());
-    CHECK_DEVICE_ALLOCATION(alpha_d.memcheck());
-    CHECK_DEVICE_ALLOCATION(dinvA.memcheck());
+    DEVICE_MEMCHECK(device_matrix<T>, dA, (K, K, lda));
+    DEVICE_MEMCHECK(device_matrix<T>, dXorB, (M, N, ldb));
+    DEVICE_MEMCHECK(device_matrix<T>, dinvA, (TRSM_BLOCK, TRSM_BLOCK, K));
+    DEVICE_MEMCHECK(device_vector<T>, alpha_d, (1));
 
     // Initialize data on host memory
     rocblas_init_matrix(hA,
@@ -426,8 +403,6 @@ void testing_trsm_ex(const Arguments& arg)
         CHECK_ROCBLAS_ERROR(rocblas_set_pointer_mode(handle, rocblas_pointer_mode_host));
         CHECK_HIP_ERROR(dXorB.transfer_from(hXorB_1));
 
-        hipStream_t rocblas_stream;
-        CHECK_ROCBLAS_ERROR(rocblas_get_stream(handle, &rocblas_stream));
         handle.pre_test(arg);
         if(blocks > 0)
             CHECK_ROCBLAS_ERROR(rocblas_trtri_strided_batched<T>(handle,
@@ -502,30 +477,59 @@ void testing_trsm_ex(const Arguments& arg)
 
         if(arg.repeatability_check)
         {
-            host_matrix<T> hXorB_copy(M, N, ldb);
-            CHECK_HIP_ERROR(hXorB_copy.memcheck());
+            HOST_MEMCHECK(host_matrix<T>, hXorB_copy, (M, N, ldb));
+            CHECK_HIP_ERROR(invATemp1.transfer_from(dinvA));
 
-            for(int i = 0; i < arg.iters; i++)
+            // multi-GPU support
+            int device_id, device_count;
+            CHECK_HIP_ERROR(limit_device_count(device_count, (int)arg.devices));
+
+            for(int dev_id = 0; dev_id < device_count; dev_id++)
             {
-                CHECK_HIP_ERROR(dXorB.transfer_from(hB));
-                CHECK_ROCBLAS_ERROR(rocblas_trsm_ex_fn(handle,
-                                                       side,
-                                                       uplo,
-                                                       transA,
-                                                       diag,
-                                                       M,
-                                                       N,
-                                                       alpha_d,
-                                                       dA,
-                                                       lda,
-                                                       dXorB,
-                                                       ldb,
-                                                       dinvA,
-                                                       TRSM_BLOCK * K,
-                                                       arg.compute_type));
+                CHECK_HIP_ERROR(hipGetDevice(&device_id));
+                if(device_id != dev_id)
+                    CHECK_HIP_ERROR(hipSetDevice(dev_id));
 
-                CHECK_HIP_ERROR(hXorB_copy.transfer_from(dXorB));
-                unit_check_general<T>(M, N, ldb, hXorB_2, hXorB_copy);
+                //New rocblas handle for new device
+                rocblas_local_handle handle_copy{arg};
+
+                //Allocate device memory in new device
+                DEVICE_MEMCHECK(device_matrix<T>, dA_copy, (K, K, lda));
+                DEVICE_MEMCHECK(device_matrix<T>, dXorB_copy, (M, N, ldb));
+                DEVICE_MEMCHECK(device_matrix<T>, dinvA_copy, (TRSM_BLOCK, TRSM_BLOCK, K));
+                DEVICE_MEMCHECK(device_vector<T>, alpha_d_copy, (1));
+
+                CHECK_HIP_ERROR(dA_copy.transfer_from(hA));
+                CHECK_HIP_ERROR(dinvA_copy.transfer_from(invATemp1));
+
+                CHECK_HIP_ERROR(
+                    hipMemcpy(alpha_d_copy, &alpha_h, sizeof(T), hipMemcpyHostToDevice));
+
+                CHECK_ROCBLAS_ERROR(
+                    rocblas_set_pointer_mode(handle_copy, rocblas_pointer_mode_device));
+
+                for(int runs = 0; runs < arg.iters; runs++)
+                {
+                    CHECK_HIP_ERROR(dXorB_copy.transfer_from(hB));
+                    CHECK_ROCBLAS_ERROR(rocblas_trsm_ex_fn(handle_copy,
+                                                           side,
+                                                           uplo,
+                                                           transA,
+                                                           diag,
+                                                           M,
+                                                           N,
+                                                           alpha_d_copy,
+                                                           dA_copy,
+                                                           lda,
+                                                           dXorB_copy,
+                                                           ldb,
+                                                           dinvA_copy,
+                                                           TRSM_BLOCK * K,
+                                                           arg.compute_type));
+
+                    CHECK_HIP_ERROR(hXorB_copy.transfer_from(dXorB_copy));
+                    unit_check_general<T>(M, N, ldb, hXorB_2, hXorB_copy);
+                }
             }
             return;
         }

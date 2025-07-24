@@ -14,10 +14,18 @@ def runCI =
     nodeDetails, jobName->
 
     def prj = new rocProject('rocBLAS', 'MultiGPU')
+
     // customize for project
     prj.paths.build_command = './install.sh -c'
 
-    prj.defaults.ccache = true
+    def noHipblasLT = env.BRANCH_NAME ==~ /PR-\d+/ && pullRequest.labels.contains("noHipblasLT")
+
+    if (!noHipblasLT)
+    {
+        prj.libraryDependencies = ['hipBLAS-common', 'hipBLASLt']
+    }
+
+    prj.defaults.ccache = false
     prj.timeout.compile = 480
 
     // Define test architectures, optional rocm version argument is available

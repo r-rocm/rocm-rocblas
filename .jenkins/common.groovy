@@ -2,19 +2,21 @@
 // If you are interested in running your own Jenkins, please raise a github issue for assistance.
 
 
-def runCompileCommand(platform, project, jobName)
+def runCompileCommand(platform, project, jobName, boolean sameOrg=false)
 {
     project.paths.construct_build_prefix()
 
     String centos7 = platform.jenkinsLabel.contains('centos7') ? 'source scl_source enable devtoolset-7' : ':'
-    String hipccCompileFlags = ""
     String dynamicBuildCommand = project.paths.build_command
     String dynamicOptions = ""
 
-    if (jobName.contains('hipclang'))
+    def getDependenciesCommand = ""
+    if (project.installLibraryDependenciesFromCI)
     {
-        //default in the hipclang docker containers. May change later on
-        hipccCompileFlags = "export HIPCC_COMPILE_FLAGS_APPEND='-O3 -Wno-format-nonliteral -parallel-jobs=2'"
+        project.libraryDependencies.each
+        { libraryName ->
+            getDependenciesCommand += auxiliary.getLibrary(libraryName, platform.jenkinsLabel, null, sameOrg)
+        }
     }
 
     if (env.BRANCH_NAME ==~ /PR-\d+/)
@@ -22,6 +24,11 @@ def runCompileCommand(platform, project, jobName)
         if (pullRequest.labels.contains("noTensile"))
         {
             dynamicBuildCommand = dynamicBuildCommand + ' -n'
+        }
+
+        if (pullRequest.labels.contains("noHipblasLT"))
+        {
+            dynamicBuildCommand = dynamicBuildCommand + ' --no_hipblaslt'
         }
 
         // in PR if we are targeting develop branch build ONLY what CI pipeline will test, unless bug label
@@ -49,10 +56,9 @@ def runCompileCommand(platform, project, jobName)
                 set -x
                 cd ${project.paths.project_build_prefix}
                 ${centos7}
-                echo Original HIPCC_COMPILE_FLAGS_APPEND: \$HIPCC_COMPILE_FLAGS_APPEND
-                ${hipccCompileFlags}
+                ${getDependenciesCommand}
                 ${auxiliary.gfxTargetParser()}
-                CXX=/opt/rocm/bin/hipcc ${dynamicBuildCommand} ${dynamicOptions}
+                ${dynamicBuildCommand} ${dynamicOptions}
                 """
     platform.runCommand(this, command)
 }
@@ -166,23 +172,23 @@ def runTestCommand (platform, project, gfilter)
                   """
 
     platform.runCommand(this, command)
-    junit testXMLPath
 }
 
-def runPackageCommand(platform, project)
+def runPackageCommand(platform, project, boolean debug=false)
 {
-        def packageHelper = platform.makePackage(platform.jenkinsLabel,"${project.paths.project_build_prefix}/build/release")
-        platform.runCommand(this, packageHelper[0])
-        platform.archiveArtifacts(this, packageHelper[1])
-        def cleanCommand = """#!/usr/bin/env bash
-                                set -x
-                                cd ${project.paths.project_build_prefix}/build/
-                                find -name '*.o.d' -delete
-                                find -name '*.o' -delete
-                                find -type d -name '*build_tmp*' -exec rm -rf {} +
-                                find -type d -name '*_CPack_Packages*' -exec rm -rf {} +
-                           """
-        platform.runCommand(this, cleanCommand)
+    String buildTypeDir = debug ? 'debug' : 'release'
+    def packageHelper = platform.makePackage(platform.jenkinsLabel,"${project.paths.project_build_prefix}/build/${buildTypeDir}")
+    platform.runCommand(this, packageHelper[0])
+    platform.archiveArtifacts(this, packageHelper[1])
+    def cleanCommand = """#!/usr/bin/env bash
+                            set -x
+                            cd ${project.paths.project_build_prefix}/build/
+                            find -name '*.o.d' -delete
+                            find -name '*.o' -delete
+                            find -type d -name '*build_tmp*' -exec rm -rf {} +
+                            find -type d -name '*_CPack_Packages*' -exec rm -rf {} +
+                        """
+    platform.runCommand(this, cleanCommand)
 }
 
 return this

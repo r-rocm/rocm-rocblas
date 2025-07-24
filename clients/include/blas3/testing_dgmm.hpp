@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2024 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2018-2025 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -22,33 +22,23 @@
 
 #pragma once
 
-#include "cblas_interface.hpp"
-#include "flops.hpp"
-#include "norm.hpp"
-#include "rocblas.hpp"
-#include "rocblas_datatype2string.hpp"
-#include "rocblas_init.hpp"
-#include "rocblas_math.hpp"
-#include "rocblas_matrix.hpp"
-#include "rocblas_random.hpp"
-#include "rocblas_test.hpp"
-#include "rocblas_vector.hpp"
-#include "unit.hpp"
-#include "utility.hpp"
+#include "testing_common.hpp"
 
 /* ============================================================================================ */
 
 template <typename T>
 void testing_dgmm_bad_arg(const Arguments& arg)
 {
-    auto rocblas_dgmm_fn = arg.api == FORTRAN ? rocblas_dgmm<T, true> : rocblas_dgmm<T, false>;
+    auto rocblas_dgmm_fn = arg.api & c_API_FORTRAN ? rocblas_dgmm<T, true> : rocblas_dgmm<T, false>;
+    auto rocblas_dgmm_fn_64
+        = arg.api & c_API_FORTRAN ? rocblas_dgmm_64<T, true> : rocblas_dgmm_64<T, false>;
 
-    const rocblas_int M = 100;
-    const rocblas_int N = 101;
+    const int64_t M = 100;
+    const int64_t N = 101;
 
-    const rocblas_int lda  = 100;
-    const rocblas_int incx = 1;
-    const rocblas_int ldc  = 100;
+    const int64_t lda  = 100;
+    const int64_t incx = 1;
+    const int64_t ldc  = 100;
 
     rocblas_side side = rocblas_side_left;
 
@@ -58,50 +48,50 @@ void testing_dgmm_bad_arg(const Arguments& arg)
     rocblas_int K = rocblas_side_right == side ? N : M;
 
     // Allocate device memory
-    device_matrix<T> dA(M, N, lda);
-    device_vector<T> dx(K, incx);
-    device_matrix<T> dC(M, N, ldc);
+    DEVICE_MEMCHECK(device_matrix<T>, dA, (M, N, lda));
+    DEVICE_MEMCHECK(device_vector<T>, dx, (K, incx));
+    DEVICE_MEMCHECK(device_matrix<T>, dC, (M, N, ldc));
 
-    // Check device memory allocation
-    CHECK_DEVICE_ALLOCATION(dA.memcheck());
-    CHECK_DEVICE_ALLOCATION(dx.memcheck());
-    CHECK_DEVICE_ALLOCATION(dC.memcheck());
+    DAPI_EXPECT(rocblas_status_invalid_handle,
+                rocblas_dgmm_fn,
+                (nullptr, side, M, N, dA, lda, dx, incx, dC, ldc));
 
-    EXPECT_ROCBLAS_STATUS(rocblas_dgmm_fn(nullptr, side, M, N, dA, lda, dx, incx, dC, ldc),
-                          rocblas_status_invalid_handle);
-
-    EXPECT_ROCBLAS_STATUS(
-        rocblas_dgmm_fn(handle, (rocblas_side)rocblas_fill_full, M, N, dA, lda, dx, incx, dC, ldc),
-        rocblas_status_invalid_value);
+    DAPI_EXPECT(rocblas_status_invalid_value,
+                rocblas_dgmm_fn,
+                (handle, (rocblas_side)rocblas_fill_full, M, N, dA, lda, dx, incx, dC, ldc));
 
     // sizes and quick returns done in normal test harness
+    DAPI_EXPECT(rocblas_status_invalid_pointer,
+                rocblas_dgmm_fn,
+                (handle, side, M, N, nullptr, lda, dx, incx, dC, ldc));
 
-    EXPECT_ROCBLAS_STATUS(rocblas_dgmm_fn(handle, side, M, N, nullptr, lda, dx, incx, dC, ldc),
-                          rocblas_status_invalid_pointer);
+    DAPI_EXPECT(rocblas_status_invalid_pointer,
+                rocblas_dgmm_fn,
+                (handle, side, M, N, dA, lda, nullptr, incx, dC, ldc));
 
-    EXPECT_ROCBLAS_STATUS(rocblas_dgmm_fn(handle, side, M, N, dA, lda, nullptr, incx, dC, ldc),
-                          rocblas_status_invalid_pointer);
-
-    EXPECT_ROCBLAS_STATUS(rocblas_dgmm_fn(handle, side, M, N, dA, lda, dx, incx, nullptr, ldc),
-                          rocblas_status_invalid_pointer);
+    DAPI_EXPECT(rocblas_status_invalid_pointer,
+                rocblas_dgmm_fn,
+                (handle, side, M, N, dA, lda, dx, incx, nullptr, ldc));
 }
 
 template <typename T>
 void testing_dgmm(const Arguments& arg)
 {
-    auto rocblas_dgmm_fn = arg.api == FORTRAN ? rocblas_dgmm<T, true> : rocblas_dgmm<T, false>;
+    auto rocblas_dgmm_fn = arg.api & c_API_FORTRAN ? rocblas_dgmm<T, true> : rocblas_dgmm<T, false>;
+    auto rocblas_dgmm_fn_64
+        = arg.api & c_API_FORTRAN ? rocblas_dgmm_64<T, true> : rocblas_dgmm_64<T, false>;
 
     rocblas_side side = char2rocblas_side(arg.side);
 
-    rocblas_int M = arg.M;
-    rocblas_int N = arg.N;
-    rocblas_int K = rocblas_side_right == side ? size_t(N) : size_t(M);
+    int64_t M = arg.M;
+    int64_t N = arg.N;
+    int64_t K = rocblas_side_right == side ? size_t(N) : size_t(M);
 
-    rocblas_int lda  = arg.lda;
-    rocblas_int incx = arg.incx;
-    rocblas_int ldc  = arg.ldc;
+    int64_t lda  = arg.lda;
+    int64_t incx = arg.incx;
+    int64_t ldc  = arg.ldc;
 
-    double gpu_time_used, cpu_time_used;
+    double cpu_time_used;
 
     double rocblas_error = std::numeric_limits<double>::max();
 
@@ -111,28 +101,23 @@ void testing_dgmm(const Arguments& arg)
     bool invalid_size = M < 0 || N < 0 || lda < M || ldc < M;
     if(invalid_size || !M || !N)
     {
-        EXPECT_ROCBLAS_STATUS(
-            rocblas_dgmm_fn(handle, side, M, N, nullptr, lda, nullptr, incx, nullptr, ldc),
-            invalid_size ? rocblas_status_invalid_size : rocblas_status_success);
+        DAPI_EXPECT(invalid_size ? rocblas_status_invalid_size : rocblas_status_success,
+                    rocblas_dgmm_fn,
+                    (handle, side, M, N, nullptr, lda, nullptr, incx, nullptr, ldc));
         return;
     }
 
     // Naming: `h` is in CPU (host) memory(eg hA), `d` is in GPU (device) memory (eg dA).
     // Allocate host memory
-    host_matrix<T> hA(M, N, lda);
-    host_vector<T> hx(K, incx);
-    host_matrix<T> hC(M, N, ldc);
-    host_matrix<T> hC_gold(M, N, ldc);
+    HOST_MEMCHECK(host_matrix<T>, hA, (M, N, lda));
+    HOST_MEMCHECK(host_vector<T>, hx, (K, incx));
+    HOST_MEMCHECK(host_matrix<T>, hC, (M, N, ldc));
+    HOST_MEMCHECK(host_matrix<T>, hC_gold, (M, N, ldc));
 
     // Allocate device memory
-    device_matrix<T> dA(M, N, lda);
-    device_vector<T> dx(K, incx);
-    device_matrix<T> dC(M, N, ldc);
-
-    // Check device memory allocation
-    CHECK_DEVICE_ALLOCATION(dA.memcheck());
-    CHECK_DEVICE_ALLOCATION(dx.memcheck());
-    CHECK_DEVICE_ALLOCATION(dC.memcheck());
+    DEVICE_MEMCHECK(device_matrix<T>, dA, (M, N, lda));
+    DEVICE_MEMCHECK(device_vector<T>, dx, (K, incx));
+    DEVICE_MEMCHECK(device_matrix<T>, dC, (M, N, ldc));
 
     // Initialize data on host memory
     rocblas_init_matrix(hA, arg, rocblas_client_never_set_nan, rocblas_client_general_matrix, true);
@@ -148,7 +133,7 @@ void testing_dgmm(const Arguments& arg)
     {
         // ROCBLAS
         handle.pre_test(arg);
-        CHECK_ROCBLAS_ERROR(rocblas_dgmm_fn(handle, side, M, N, dA, lda, dx, incx, dC, ldc));
+        DAPI_CHECK(rocblas_dgmm_fn, (handle, side, M, N, dA, lda, dx, incx, dC, ldc));
         handle.post_test(arg);
 
         // fecth from GPU
@@ -156,15 +141,42 @@ void testing_dgmm(const Arguments& arg)
 
         if(arg.repeatability_check)
         {
-            host_matrix<T> hC_copy(M, N, ldc);
+            HOST_MEMCHECK(host_matrix<T>, hC_copy, (M, N, ldc));
+            // multi-GPU support
+            int device_id, device_count;
+            CHECK_HIP_ERROR(limit_device_count(device_count, (int)arg.devices));
 
-            for(int i = 0; i < arg.iters; i++)
+            for(int dev_id = 0; dev_id < device_count; dev_id++)
             {
-                CHECK_ROCBLAS_ERROR(
-                    rocblas_dgmm_fn(handle, side, M, N, dA, lda, dx, incx, dC, ldc));
+                CHECK_HIP_ERROR(hipGetDevice(&device_id));
+                if(device_id != dev_id)
+                    CHECK_HIP_ERROR(hipSetDevice(dev_id));
 
-                CHECK_HIP_ERROR(hC_copy.transfer_from(dC));
-                unit_check_general<T>(M, N, ldc, hC, hC_copy);
+                //New rocblas handle for new device
+                rocblas_local_handle handle_copy{arg};
+
+                //Allocate device memory in new device
+                DEVICE_MEMCHECK(device_matrix<T>, dA_copy, (M, N, lda));
+                DEVICE_MEMCHECK(device_vector<T>, dx_copy, (K, incx));
+                DEVICE_MEMCHECK(device_matrix<T>, dC_copy, (M, N, ldc));
+
+                // copy data from CPU to device
+                CHECK_HIP_ERROR(dA_copy.transfer_from(hA));
+                CHECK_HIP_ERROR(dx_copy.transfer_from(hx));
+                CHECK_HIP_ERROR(dC_copy.transfer_from(hC));
+
+                CHECK_ROCBLAS_ERROR(
+                    rocblas_set_pointer_mode(handle_copy, rocblas_pointer_mode_device));
+
+                for(int runs = 0; runs < arg.iters; runs++)
+                {
+                    DAPI_CHECK(
+                        rocblas_dgmm_fn,
+                        (handle_copy, side, M, N, dA_copy, lda, dx_copy, incx, dC_copy, ldc));
+
+                    CHECK_HIP_ERROR(hC_copy.transfer_from(dC_copy));
+                    unit_check_general<T>(M, N, ldc, hC, hC_copy);
+                }
             }
             return;
         }
@@ -188,22 +200,22 @@ void testing_dgmm(const Arguments& arg)
 
     if(arg.timing)
     {
-        int number_cold_calls = arg.cold_iters;
-        int number_hot_calls  = arg.iters;
-
-        for(int i = 0; i < number_cold_calls; i++)
-        {
-            rocblas_dgmm_fn(handle, side, M, N, dA, lda, dx, incx, dC, ldc);
-        }
+        double gpu_time_used;
+        int    number_cold_calls = arg.cold_iters;
+        int    total_calls       = number_cold_calls + arg.iters;
 
         hipStream_t stream;
         CHECK_ROCBLAS_ERROR(rocblas_get_stream(handle, &stream));
-        gpu_time_used = get_time_us_sync(stream); // in microseconds
-        for(int i = 0; i < number_hot_calls; i++)
+
+        for(int iter = 0; iter < total_calls; iter++)
         {
-            rocblas_dgmm_fn(handle, side, M, N, dA, lda, dx, incx, dC, ldc);
+            if(iter == number_cold_calls)
+                gpu_time_used = get_time_us_sync(stream);
+
+            DAPI_DISPATCH(rocblas_dgmm_fn, (handle, side, M, N, dA, lda, dx, incx, dC, ldc));
         }
-        gpu_time_used = get_time_us_sync(stream) - gpu_time_used;
+
+        gpu_time_used = get_time_us_sync(stream) - gpu_time_used; // in microseconds
 
         ArgumentModel<e_side, e_M, e_N, e_lda, e_incx, e_ldc>{}.log_args<T>(
             rocblas_cout,

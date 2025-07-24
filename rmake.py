@@ -46,7 +46,7 @@ def parse_args():
     general_opts = parser.add_argument_group('General Build Options')
     experimental_opts = parser.add_argument_group('Experimental Build Options')
 
-    general_opts.add_argument('-a', '--architecture', dest='gpu_architecture', required=False, default="all",
+    general_opts.add_argument('-a', '--architecture', dest='gpu_architecture', type=str, required=False, default="all",
                         help='Set GPU architectures, e.g. all, auto, "gfx900;gfx906:xnack-", gfx1030 (optional, default: all, recommended: auto, builds for architecture detected on the build machine)')
 
     experimental_opts.add_argument(       '--address-sanitizer', dest='address_sanitizer', required=False, default=False, action='store_true',
@@ -55,9 +55,12 @@ def parse_args():
     experimental_opts.add_argument('-b', '--branch', dest='tensile_tag', type=str, required=False, default="",
                         help='Specify the Tensile repository branch or tag to use. (eg. develop, mybranch or <commit hash> )')
 
-    general_opts.add_argument(      '--build_dir', type=str, required=False, default = "build",
+    general_opts.add_argument(      '--build_dir', type=str, required=False, default="build",
                         help='Specify path to configure & build process output directory.(optional, default: ./build)')
 
+    general_opts.add_argument(      '--ci_labels', type=str, required=False, default="",
+                        help='Semi-colon seperated list of labels that may modify build (optional, e.g. "gfx12;noTensile")')
+    
     general_opts.add_argument(      '--cleanup', required=False, default=False, action='store_true',
                         help='Remove intermediary build files after build to reduce disk usage. (Linux only handled by install.sh)')
 
@@ -86,7 +89,7 @@ def parse_args():
                         help='Build and install external dependencies. (Handled by install.sh and on Windows rdeps.py')
 
     experimental_opts.add_argument('-f', '--fork', dest='tensile_fork', type=str, required=False, default="",
-                        help='Specify the username to fork the Tensile GitHub repository (e.g., ROCmSoftwarePlatform or MyUserName)')
+                        help='Specify the username to fork the Tensile GitHub repository (e.g., ROCm or MyUserName)')
 
     general_opts.add_argument('-g', '--debug', required=False, default=False,  action='store_true',
                         help='Build in Debug mode (optional, default: False)')
@@ -99,6 +102,9 @@ def parse_args():
 
     general_opts.add_argument('-j', '--jobs', type=int, required=False, default=0,
                         help='Specify number of parallel jobs to launch, affects memory usage (default: heuristic around logical core count)')
+
+    general_opts.add_argument('--ninja', required=False, default=False, action='store_true',
+                        help='Build using ninja generator (default: false on Linux, true on windows)')
 
     experimental_opts.add_argument('-k', '--relwithdebinfo', required=False, default=False, action='store_true',
                         help='Build in Release with Debug Info (optional, default: False)')
@@ -118,6 +124,9 @@ def parse_args():
     experimental_opts.add_argument('-n', '--no_tensile', dest='build_tensile', required=False, default=True, action='store_false',
                         help='Build a subset of rocBLAS library which does not require Tensile.')
 
+    experimental_opts.add_argument(      '--no_hipblaslt', dest='build_hipblaslt', required=False, default=True, action='store_false',
+                        help='Build a subset of rocBLAS library which does not require HipBLASLt.')
+
     experimental_opts.add_argument(     '--merge-architectures', dest='merge_architectures', required=False, default=False, action='store_true',
                         help='Merge TensileLibrary files for different architectures into single file (optional, was behavior in ROCm 5.1 and earlier)')
 
@@ -129,6 +138,9 @@ def parse_args():
 
     experimental_opts.add_argument(     '--no-msgpack', dest='tensile_msgpack_backend', required=False, default=True, action='store_false',
                         help='Build Tensile backend not to use MessagePack and so use YAML (optional)')
+
+    general_opts.add_argument( '--no-offload-compress', dest='no_offload_compress', required=False, default=False, action='store_true',
+                        help='Do not apply offload compression.')
 
     general_opts.add_argument( '-r', '--relocatable', required=False, default=False, action='store_true',
                         help='Linux only: Add RUNPATH (based on ROCM_RPATH) and remove ldconf entry.')
@@ -153,6 +165,9 @@ def parse_args():
 
     experimental_opts.add_argument('-t', '--test_local_path', dest='tensile_test_local_path', type=str, required=False, default="",
                         help='Use a local path for Tensile instead of remote GIT repo (optional)')
+
+    experimental_opts.add_argument(      '--hipblaslt_path', dest='hipblaslt_path', type=str, required=False, default="",
+                        help='Use a local path for HipBLASLt (optional)')
 
     general_opts.add_argument(      '--upgrade_tensile_venv_pip', required=False, default=False, action='store_true',
                         help='Upgrade python pip version during Tensile installation (optional, default: False)')
@@ -221,19 +236,58 @@ def os_detect():
     OS_info["NUM_PROC"] = os.cpu_count()
     OS_info["RAM_GB"] = get_ram_GB()
 
-def jobs_heuristic():
+def get_arch_parallelism() -> int:
+    global args
+    if (args.gpu_architecture == "all"):
+        num_parallel = 4
+    else:
+        num_parallel = min( 4, len(args.gpu_architecture.split(';')) )
+    return num_parallel
+
+def get_compiler_jobs(env_var: str) -> int:
+        cjobs = 1
+        pjstr = env_var.split("parallel-jobs=")
+        if len(pjstr) > 1:
+            arg = pjstr[1].split(" ")
+            if len(arg[0]):
+                cjobs = int(arg[0])
+        return cjobs
+
+def get_env_compiler_parallelism() -> int:
+    # disable for now due to windows compiler issue and linux ignored warning
+    return 1
+
+    # new and legacy env
+    hip_clang_job_env = os.getenv('HIP_CLANG_NUM_PARALLEL_JOBS', "0")
+
+    if len(hip_clang_job_env) and int(hip_clang_job_env) > 0:
+        return int(hip_clang_job_env)
+    else:
+        clang_flags = os.getenv('CCC_OVERRIDE_OPTIONS', "")
+        hipcc_flags = os.getenv('HIPCC_COMPILE_FLAGS_APPEND', "")
+        cjobs = 1
+        if len(clang_flags) > 1:
+            cjobs = get_compiler_jobs( clang_flags )
+        elif len(hipcc_flags) > 1:
+            cjobs = get_compiler_jobs( hipcc_flags )
+        if (cjobs == 1 and len(clang_flags) < 1) and len(hipcc_flags) < 1:
+            cjobs = get_arch_parallelism()
+            # use HIP_ define to capture to makefiles, as env override would be compile time
+            # if cjobs > 1:
+            #     custom_env["CCC_OVERRIDE_OPTIONS"] = f"#+-parallel-jobs={cjobs}"
+        cjobs = min(8, cjobs)
+        return cjobs
+
+def jobs_heuristic() -> int:
     # auto jobs heuristics
     nprocs = min(OS_info["NUM_PROC"], 128) # disk limiter
     ram = OS_info["RAM_GB"]
     jobs = nprocs
     if (ram >= 16): # don't apply if below minimum RAM
         jobs = min(round(ram/2), jobs) # RAM limiter
-    hipcc_flags = os.getenv('HIPCC_COMPILE_FLAGS_APPEND', "")
-    pjstr = hipcc_flags.split("parallel-jobs=")
-    if (len(pjstr) > 1):
-        pjobs = int(pjstr[1][0])
-        if (pjobs > 1):
-            jobs = min( jobs, max( 1, round(nprocs / pjobs) ) )
+    pjobs = get_env_compiler_parallelism()
+    if (pjobs > 1 and pjobs < jobs):
+        jobs = round(jobs / pjobs)
     if os.name == "nt":
         jobs = min(61, jobs) # multiprocessing limit (used by tensile)
     return int(jobs)
@@ -304,11 +358,18 @@ def config_cmd():
     else:
         rocm_raw_path = os.getenv('ROCM_PATH', "/opt/rocm")
         rocm_path = rocm_raw_path
+        if (args.ninja):
+            cmake_platform_opts.append(f"-G Ninja")
         cmake_platform_opts.append(f"-DROCM_DIR:PATH={rocm_path} -DCPACK_PACKAGING_INSTALL_PREFIX={rocm_path}")
         cmake_platform_opts.append(f'-DCMAKE_INSTALL_PREFIX="rocblas-install"')
         toolchain = "toolchain-linux.cmake"
 
     print(f"Build source path: {src_path}")
+
+    cjobs = get_env_compiler_parallelism()
+    if cjobs > 1:
+        compile_args = f"-DHIP_CLANG_NUM_PARALLEL_JOBS={cjobs}"
+        cmake_options.append(compile_args)
 
     tools = f"-DCMAKE_TOOLCHAIN_FILE={toolchain}"
     cmake_options.append(tools)
@@ -352,6 +413,9 @@ def config_cmd():
     if args.address_sanitizer:
         cmake_options.append(f"-DBUILD_ADDRESS_SANITIZER=ON")
 
+    if args.no_offload_compress:
+        cmake_options.append(f"-DBUILD_OFFLOAD_COMPRESS=OFF")
+
     # clean
     delete_dir(build_path)
 
@@ -392,7 +456,7 @@ def config_cmd():
         else:
             fatal("Could not detect GPU as requested. Not continuing.")
     # not just for tensile
-    cmake_options.append(f'-DAMDGPU_TARGETS=\"{args.gpu_architecture}\"')
+    cmake_options.append(f'-DGPU_TARGETS=\"{args.gpu_architecture}\"')
 
     if not args.build_tensile:
         cmake_options.append(f"-DBUILD_WITH_TENSILE=OFF")
@@ -423,7 +487,14 @@ def config_cmd():
         else:
             cmake_options.append(f"-DTensile_LIBRARY_FORMAT=yaml")
         if args.jobs != OS_info["NUM_PROC"]:
-            cmake_options.append(f"-DTensile_CPU_THREADS={str(args.jobs)}")
+            # tensile doesn't use HIP_CLANG_NUM_PARALLEL_JOBS so multiply by cjobs
+            cmake_options.append(f"-DTensile_CPU_THREADS={str(args.jobs*cjobs)}")
+        if not args.build_hipblaslt:
+            cmake_options.append(f"-DBUILD_WITH_HIPBLASLT=OFF")
+        else:
+            cmake_options.append(f"-DBUILD_WITH_HIPBLASLT=ON")
+            if args.hipblaslt_path:
+                cmake_options.append(f"-Dhipblaslt_path={args.hipblaslt_path}")
 
     if args.legacy_include_dir:
         cmake_options.append(f"-DBUILD_FILE_REORG_BACKWARD_COMPATIBILITY=ON")
@@ -452,26 +523,35 @@ def make_cmd():
 
     make_options = []
 
-    if os.name == "nt":
+    if os.name == "nt" or args.ninja:
         # the CMAKE_BUILD_PARALLEL_LEVEL currently doesn't work for windows build, so using -j
         # make_executable = f"cmake.exe -DCMAKE_BUILD_PARALLEL_LEVEL=4 --build . " # ninja
-        make_executable = f"ninja.exe -j {args.jobs}"
+        exe_suffix = ".exe" if os.name == "nt" else ""
+        make_executable = f"ninja{exe_suffix} -j {args.jobs}"
         if args.verbose:
             make_options.append("--verbose")
-        make_options.append("all")  # for cmake "--target all" )
+        make_options.append("all")
         if args.install:
-            make_options.append("package install")  # for cmake "--target package --target install" )
+            make_options.append("package")
     else:
         make_executable = f"make -j{args.jobs}"
         if args.verbose:
             make_options.append("VERBOSE=1")
-        if not args.clients_only:
-            make_options.append("install")
+    if not args.clients_only:
+        make_options.append("install")
     cmd_opts = " ".join(make_options)
 
     return make_executable, cmd_opts
 
+def label_modifiers(labels):
+    global args
 
+    processed = ["noTensile"]
+    overlap = [v for v in processed if v in labels]
+    if len(overlap):
+        if "noTensile" in overlap:
+            args.build_tensile = False
+    
 def run_cmd(exe, opts):
     program = f"{exe} {opts}"
     print(program)
@@ -483,6 +563,8 @@ def main():
     global args
     os_detect()
     args = parse_args()
+
+    label_modifiers(args.ci_labels.split(';'))
 
     if args.jobs == 0:
         args.jobs = jobs_heuristic()

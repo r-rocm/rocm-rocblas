@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2024 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2018-2025 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -36,8 +36,7 @@ void testing_iamax_iamin_bad_arg(const Arguments& arg, FUNC func)
     CHECK_ROCBLAS_ERROR(rocblas_set_pointer_mode(handle, rocblas_pointer_mode_device));
 
     // Allocate device memory
-    device_vector<T> dx(N, incx);
-    CHECK_DEVICE_ALLOCATION(dx.memcheck());
+    DEVICE_MEMCHECK(device_vector<T>, dx, (N, incx));
 
     R h_rocblas_result;
 
@@ -70,11 +69,9 @@ void testing_iamax_iamin(const Arguments& arg, FUNC func)
     // check to prevent undefined memory allocation error
     if(N <= 0 || incx <= 0)
     {
-        device_vector<R> d_result(1);
-        CHECK_DEVICE_ALLOCATION(d_result.memcheck());
+        DEVICE_MEMCHECK(device_vector<R>, d_result, (1));
 
-        host_vector<R> h_result(1);
-        CHECK_HIP_ERROR(h_result.memcheck());
+        HOST_MEMCHECK(host_vector<R>, h_result, (1));
 
         CHECK_ROCBLAS_ERROR(rocblas_set_pointer_mode(handle, rocblas_pointer_mode_device));
         CHECK_ROCBLAS_ERROR(func(handle, N, nullptr, incx, d_result));
@@ -96,15 +93,11 @@ void testing_iamax_iamin(const Arguments& arg, FUNC func)
 
     // Naming: `h` is in CPU (host) memory(eg hx), `d` is in GPU (device) memory (eg dx).
     // Allocate host memory
-    host_vector<T> hx(N, incx);
+    HOST_MEMCHECK(host_vector<T>, hx, (N, incx));
 
     // Allocate device memory
-    device_vector<T> dx(N, incx);
-    device_vector<R> d_rocblas_result(1);
-
-    // Check device memory allocation
-    CHECK_DEVICE_ALLOCATION(dx.memcheck());
-    CHECK_DEVICE_ALLOCATION(d_rocblas_result.memcheck());
+    DEVICE_MEMCHECK(device_vector<T>, dx, (N, incx));
+    DEVICE_MEMCHECK(device_vector<R>, d_rocblas_result, (1));
 
     // Initial Data on CPU
     rocblas_init_vector(hx, arg, rocblas_client_alpha_sets_nan, true);
@@ -135,16 +128,40 @@ void testing_iamax_iamin(const Arguments& arg, FUNC func)
                 R h_rocblas_result_copy;
                 CHECK_HIP_ERROR(hipMemcpy(
                     &h_rocblas_result_device, d_rocblas_result, sizeof(R), hipMemcpyDeviceToHost));
-                for(int i = 0; i < arg.iters; i++)
+
+                // multi-GPU support
+                int device_id, device_count;
+                CHECK_HIP_ERROR(limit_device_count(device_count, (int)arg.devices));
+
+                for(int dev_id = 0; dev_id < device_count; dev_id++)
                 {
-                    CHECK_HIP_ERROR(dx.transfer_from(hx));
-                    CHECK_ROCBLAS_ERROR(func(handle, N, dx, incx, d_rocblas_result));
-                    CHECK_HIP_ERROR(hipMemcpy(&h_rocblas_result_copy,
-                                              d_rocblas_result,
-                                              sizeof(R),
-                                              hipMemcpyDeviceToHost));
-                    unit_check_general<R>(
-                        1, 1, 1, &h_rocblas_result_device, &h_rocblas_result_copy);
+                    CHECK_HIP_ERROR(hipGetDevice(&device_id));
+                    if(device_id != dev_id)
+                        CHECK_HIP_ERROR(hipSetDevice(dev_id));
+
+                    //New rocblas handle for new device
+                    rocblas_local_handle handle_copy{arg};
+
+                    // Allocate device memory in new device
+                    DEVICE_MEMCHECK(device_vector<T>, dx_copy, (N, incx));
+                    DEVICE_MEMCHECK(device_vector<R>, d_rocblas_result_copy, (1));
+
+                    CHECK_HIP_ERROR(dx_copy.transfer_from(hx));
+
+                    CHECK_ROCBLAS_ERROR(
+                        rocblas_set_pointer_mode(handle_copy, rocblas_pointer_mode_device));
+
+                    for(int runs = 0; runs < arg.iters; runs++)
+                    {
+                        CHECK_ROCBLAS_ERROR(
+                            func(handle_copy, N, dx_copy, incx, d_rocblas_result_copy));
+                        CHECK_HIP_ERROR(hipMemcpy(&h_rocblas_result_copy,
+                                                  d_rocblas_result_copy,
+                                                  sizeof(R),
+                                                  hipMemcpyDeviceToHost));
+                        unit_check_general<R>(
+                            1, 1, 1, &h_rocblas_result_device, &h_rocblas_result_copy);
+                    }
                 }
                 return;
             }
@@ -226,9 +243,10 @@ void testing_iamax_iamin(const Arguments& arg, FUNC func)
 template <typename T>
 void testing_iamax_bad_arg(const Arguments& arg)
 {
-    auto rocblas_iamax_fn = arg.api == FORTRAN ? rocblas_iamax<T, true> : rocblas_iamax<T, false>;
+    auto rocblas_iamax_fn
+        = arg.api & c_API_FORTRAN ? rocblas_iamax<T, true> : rocblas_iamax<T, false>;
     auto rocblas_iamax_fn_64
-        = arg.api == FORTRAN_64 ? rocblas_iamax_64<T, true> : rocblas_iamax_64<T, false>;
+        = arg.api & c_API_FORTRAN ? rocblas_iamax_64<T, true> : rocblas_iamax_64<T, false>;
 
     if(arg.api & c_API_64)
         testing_iamax_iamin_bad_arg<T, int64_t>(arg, rocblas_iamax_fn_64);
@@ -239,9 +257,10 @@ void testing_iamax_bad_arg(const Arguments& arg)
 template <typename T>
 void testing_iamin_bad_arg(const Arguments& arg)
 {
-    auto rocblas_iamin_fn = arg.api == FORTRAN ? rocblas_iamin<T, true> : rocblas_iamin<T, false>;
+    auto rocblas_iamin_fn
+        = arg.api & c_API_FORTRAN ? rocblas_iamin<T, true> : rocblas_iamin<T, false>;
     auto rocblas_iamin_fn_64
-        = arg.api == FORTRAN_64 ? rocblas_iamin_64<T, true> : rocblas_iamin_64<T, false>;
+        = arg.api & c_API_FORTRAN ? rocblas_iamin_64<T, true> : rocblas_iamin_64<T, false>;
 
     if(arg.api & c_API_64)
         testing_iamax_iamin_bad_arg<T, int64_t>(arg, rocblas_iamin_fn_64);
@@ -252,9 +271,10 @@ void testing_iamin_bad_arg(const Arguments& arg)
 template <typename T>
 void testing_iamax(const Arguments& arg)
 {
-    auto rocblas_iamax_fn = arg.api == FORTRAN ? rocblas_iamax<T, true> : rocblas_iamax<T, false>;
+    auto rocblas_iamax_fn
+        = arg.api & c_API_FORTRAN ? rocblas_iamax<T, true> : rocblas_iamax<T, false>;
     auto rocblas_iamax_fn_64
-        = arg.api == FORTRAN_64 ? rocblas_iamax_64<T, true> : rocblas_iamax_64<T, false>;
+        = arg.api & c_API_FORTRAN ? rocblas_iamax_64<T, true> : rocblas_iamax_64<T, false>;
 
     if(arg.api & c_API_64)
         testing_iamax_iamin<T, rocblas_iamax_iamin_ref::iamax<T>, int64_t>(arg,
@@ -267,9 +287,10 @@ void testing_iamax(const Arguments& arg)
 template <typename T>
 void testing_iamin(const Arguments& arg)
 {
-    auto rocblas_iamin_fn = arg.api == FORTRAN ? rocblas_iamin<T, true> : rocblas_iamin<T, false>;
+    auto rocblas_iamin_fn
+        = arg.api & c_API_FORTRAN ? rocblas_iamin<T, true> : rocblas_iamin<T, false>;
     auto rocblas_iamin_fn_64
-        = arg.api == FORTRAN_64 ? rocblas_iamin_64<T, true> : rocblas_iamin_64<T, false>;
+        = arg.api & c_API_FORTRAN ? rocblas_iamin_64<T, true> : rocblas_iamin_64<T, false>;
 
     if(arg.api & c_API_64)
         testing_iamax_iamin<T, rocblas_iamax_iamin_ref::iamin<T>, int64_t>(arg,

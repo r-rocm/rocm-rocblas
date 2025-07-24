@@ -53,26 +53,28 @@ typedef long long ssize_t; /* x64 only supported */
 
 #ifdef GOOGLE_TEST
 
-// improve mismatched status reporting
-testing::AssertionResult status_match(rocblas_status expected, rocblas_status status);
+#include "gtest_helpers.hpp"
 
 // Extra macro so that macro arguments get expanded before calling Google Test
 #define CHECK_HIP_ERROR2(ERROR) ASSERT_EQ(ERROR, hipSuccess)
 #define CHECK_HIP_ERROR(ERROR) CHECK_HIP_ERROR2(ERROR)
 
-#define CHECK_DEVICE_ALLOCATION(ERROR)                   \
-    do                                                   \
-    {                                                    \
-        /* Use error__ in case ERROR contains "error" */ \
-        hipError_t error__ = (ERROR);                    \
-        if(error__ != hipSuccess)                        \
-        {                                                \
-            if(error__ == hipErrorOutOfMemory)           \
-                GTEST_SKIP() << LIMITED_VRAM_STRING;     \
-            else                                         \
-                FAIL() << hipGetErrorString(error__);    \
-            return;                                      \
-        }                                                \
+#define CHECK_DEVICE_ALLOCATION(ERROR)                                                          \
+    do                                                                                          \
+    {                                                                                           \
+        /* Use error__ in case ERROR contains "error" */                                        \
+        hipError_t error__ = (ERROR);                                                           \
+        if(error__ != hipSuccess)                                                               \
+        {                                                                                       \
+            if(error__ == hipErrorOutOfMemory)                                                  \
+            {                                                                                   \
+                rocblas_cerr << "hip OutOfMemory at " << __FILE__ ":" << __LINE__ << std::endl; \
+                GTEST_SKIP() << LIMITED_VRAM_STRING;                                            \
+            }                                                                                   \
+            else                                                                                \
+                FAIL() << hipGetErrorString(error__);                                           \
+            return;                                                                             \
+        }                                                                                       \
     } while(0)
 
 // This wraps the rocBLAS call with catch_signals_and_exceptions_as_failures().
@@ -195,9 +197,6 @@ bool match_test_category(const Arguments& arg, const char* category);
 // INSTANTIATE_TEST_CATEGORY(testclass, HMM)         \
 // INSTANTIATE_TEST_CATEGORY(testclass, known_bug)
 
-// Function to catch signals and exceptions as failures
-void catch_signals_and_exceptions_as_failures(std::function<void()> test, bool set_alarm = false);
-
 // Macro to call catch_signals_and_exceptions_as_failures() with a lambda expression
 #define CATCH_SIGNALS_AND_EXCEPTIONS_AS_FAILURES(test) \
     catch_signals_and_exceptions_as_failures([&] { test; }, true)
@@ -295,8 +294,6 @@ public:
 
 extern stream_pool g_stream_pool;
 extern thread_pool g_thread_pool;
-
-extern thread_local std::unique_ptr<std::function<void(rocblas_handle)>> t_set_stream_callback;
 
 /* ============================================================================================ */
 /*! \brief  Normalized test name to conform to Google Tests */

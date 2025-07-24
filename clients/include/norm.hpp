@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2023 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2018-2024 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -22,10 +22,10 @@
 #pragma once
 
 #include "cblas_interface.hpp"
+#include "client_utility.hpp"
 #include "norm.hpp"
 #include "rocblas.h"
 #include "rocblas_vector.hpp"
-#include "utility.hpp"
 #include <cstdio>
 #include <limits>
 #include <memory>
@@ -497,7 +497,7 @@ double vector_norm_1(int64_t M, int64_t incx, T* hx_gold, T* hx)
     double  max_err_scal = 0.0;
     double  max_err      = 0.0;
     int64_t x_offset     = incx >= 0 ? 0 : int64_t(incx) * (1 - M);
-    for(int i = 0; i < M; i++)
+    for(int64_t i = 0; i < M; i++)
     {
         size_t idx = x_offset + i * (int64_t)incx;
         max_err += rocblas_abs((hx_gold[idx] - hx[idx]));

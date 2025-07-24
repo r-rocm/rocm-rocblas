@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2024 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2018-2025 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -35,10 +35,7 @@ void testing_iamax_iamin_strided_batched_bad_arg(const Arguments& arg, FUNC func
     rocblas_stride stride_x = N * incx;
 
     // Allocate device memory
-    device_strided_batch_vector<T> dx(N, incx, stride_x, batch_count);
-
-    // Check device memory allocation
-    CHECK_DEVICE_ALLOCATION(dx.memcheck());
+    DEVICE_MEMCHECK(device_strided_batch_vector<T>, dx, (N, incx, stride_x, batch_count));
 
     for(auto pointer_mode : {rocblas_pointer_mode_host, rocblas_pointer_mode_device})
     {
@@ -74,11 +71,9 @@ void testing_iamax_iamin_strided_batched(const Arguments& arg, FUNC func)
     // check to prevent undefined memory allocation error
     if(N <= 0 || incx <= 0 || batch_count <= 0)
     {
-        device_vector<R> d_rocblas_result(std::max(batch_count, int64_t(1)));
-        CHECK_DEVICE_ALLOCATION(d_rocblas_result.memcheck());
+        DEVICE_MEMCHECK(device_vector<R>, d_rocblas_result, (std::max(batch_count, int64_t(1))));
 
-        host_vector<R> h_rocblas_result(std::max(batch_count, int64_t(1)));
-        CHECK_HIP_ERROR(h_rocblas_result.memcheck());
+        HOST_MEMCHECK(host_vector<R>, h_rocblas_result, (std::max(batch_count, int64_t(1))));
 
         CHECK_ROCBLAS_ERROR(rocblas_set_pointer_mode(handle, rocblas_pointer_mode_device));
         CHECK_ROCBLAS_ERROR(func(handle, N, nullptr, incx, stridex, batch_count, d_rocblas_result));
@@ -88,8 +83,8 @@ void testing_iamax_iamin_strided_batched(const Arguments& arg, FUNC func)
 
         if(batch_count > 0)
         {
-            host_vector<R> cpu_0(batch_count);
-            host_vector<R> gpu_0(batch_count);
+            HOST_MEMCHECK(host_vector<R>, cpu_0, (batch_count));
+            HOST_MEMCHECK(host_vector<R>, gpu_0, (batch_count));
             CHECK_HIP_ERROR(gpu_0.transfer_from(d_rocblas_result));
             unit_check_general<R>(1, 1, 1, 1, cpu_0, gpu_0, batch_count);
             unit_check_general<R>(1, 1, 1, 1, cpu_0, h_rocblas_result, batch_count);
@@ -100,22 +95,14 @@ void testing_iamax_iamin_strided_batched(const Arguments& arg, FUNC func)
 
     // Naming: `h` is in CPU (host) memory(eg hx), `d` is in GPU (device) memory (eg dx).
     // Allocate host memory
-    host_strided_batch_vector<T> hx(N, incx, stridex, batch_count);
-    host_vector<R>               hr1(batch_count);
-    host_vector<R>               hr2(batch_count);
-    host_vector<R>               cpu_result(batch_count);
-    int64_t                      i64_result;
+    HOST_MEMCHECK(host_strided_batch_vector<T>, hx, (N, incx, stridex, batch_count));
+    HOST_MEMCHECK(host_vector<R>, hr1, (batch_count));
+    HOST_MEMCHECK(host_vector<R>, hr2, (batch_count));
+    HOST_MEMCHECK(host_vector<R>, cpu_result, (batch_count));
+    int64_t i64_result;
 
-    // Check host memory allocation
-    CHECK_HIP_ERROR(hx.memcheck());
-
-    // Check device memory allocation
-    device_strided_batch_vector<T> dx(N, incx, stridex, batch_count);
-    device_vector<R>               dr(batch_count);
-
-    // Check device memory allocation
-    CHECK_DEVICE_ALLOCATION(dx.memcheck());
-    CHECK_DEVICE_ALLOCATION(dr.memcheck());
+    DEVICE_MEMCHECK(device_strided_batch_vector<T>, dx, (N, incx, stridex, batch_count));
+    DEVICE_MEMCHECK(device_vector<R>, dr, (batch_count));
 
     double cpu_time_used      = 0.0;
     double rocblas_error_host = 0.0, rocblas_error_device = 0.0;
@@ -143,13 +130,39 @@ void testing_iamax_iamin_strided_batched(const Arguments& arg, FUNC func)
 
             if(arg.repeatability_check)
             {
-                host_vector<R> hr_copy(batch_count);
+                HOST_MEMCHECK(host_vector<R>, hr_copy, (batch_count));
                 CHECK_HIP_ERROR(hr2.transfer_from(dr));
-                for(int i = 0; i < arg.iters; i++)
+
+                // multi-GPU support
+                int device_id, device_count;
+                CHECK_HIP_ERROR(limit_device_count(device_count, (int)arg.devices));
+
+                for(int dev_id = 0; dev_id < device_count; dev_id++)
                 {
-                    CHECK_ROCBLAS_ERROR(func(handle, N, dx, incx, stridex, batch_count, dr));
-                    CHECK_HIP_ERROR(hr_copy.transfer_from(dr));
-                    unit_check_general<R>(batch_count, 1, 1, hr2, hr_copy);
+                    CHECK_HIP_ERROR(hipGetDevice(&device_id));
+                    if(device_id != dev_id)
+                        CHECK_HIP_ERROR(hipSetDevice(dev_id));
+
+                    //New rocblas handle for new device
+                    rocblas_local_handle handle_copy{arg};
+
+                    // Allocate device memory in new device
+                    DEVICE_MEMCHECK(
+                        device_strided_batch_vector<T>, dx_copy, (N, incx, stridex, batch_count));
+                    DEVICE_MEMCHECK(device_vector<R>, dr_copy, (batch_count));
+
+                    CHECK_HIP_ERROR(dx_copy.transfer_from(hx));
+
+                    CHECK_ROCBLAS_ERROR(
+                        rocblas_set_pointer_mode(handle_copy, rocblas_pointer_mode_device));
+
+                    for(int runs = 0; runs < arg.iters; runs++)
+                    {
+                        CHECK_ROCBLAS_ERROR(
+                            func(handle_copy, N, dx_copy, incx, stridex, batch_count, dr_copy));
+                        CHECK_HIP_ERROR(hr_copy.transfer_from(dr_copy));
+                        unit_check_general<R>(batch_count, 1, 1, hr2, hr_copy);
+                    }
                 }
                 return;
             }
@@ -245,10 +258,10 @@ void testing_iamax_iamin_strided_batched(const Arguments& arg, FUNC func)
 template <typename T>
 void testing_iamax_strided_batched_bad_arg(const Arguments& arg)
 {
-    auto rocblas_iamax_strided_batched_fn    = arg.api == FORTRAN
+    auto rocblas_iamax_strided_batched_fn    = arg.api & c_API_FORTRAN
                                                    ? rocblas_iamax_strided_batched<T, true>
                                                    : rocblas_iamax_strided_batched<T, false>;
-    auto rocblas_iamax_strided_batched_fn_64 = arg.api == FORTRAN
+    auto rocblas_iamax_strided_batched_fn_64 = arg.api & c_API_FORTRAN
                                                    ? rocblas_iamax_strided_batched_64<T, true>
                                                    : rocblas_iamax_strided_batched_64<T, false>;
 
@@ -263,11 +276,11 @@ void testing_iamax_strided_batched_bad_arg(const Arguments& arg)
 template <typename T>
 void testing_iamin_strided_batched_bad_arg(const Arguments& arg)
 {
-    auto rocblas_iamin_strided_batched_fn = arg.api == FORTRAN
+    auto rocblas_iamin_strided_batched_fn = arg.api & c_API_FORTRAN
                                                 ? rocblas_iamin_strided_batched<T, true>
                                                 : rocblas_iamin_strided_batched<T, false>;
 
-    auto rocblas_iamin_strided_batched_fn_64 = arg.api == FORTRAN
+    auto rocblas_iamin_strided_batched_fn_64 = arg.api & c_API_FORTRAN
                                                    ? rocblas_iamin_strided_batched_64<T, true>
                                                    : rocblas_iamin_strided_batched_64<T, false>;
     if(arg.api & c_API_64)
@@ -281,10 +294,10 @@ void testing_iamin_strided_batched_bad_arg(const Arguments& arg)
 template <typename T>
 void testing_iamax_strided_batched(const Arguments& arg)
 {
-    auto rocblas_iamax_strided_batched_fn    = arg.api == FORTRAN
+    auto rocblas_iamax_strided_batched_fn    = arg.api & c_API_FORTRAN
                                                    ? rocblas_iamax_strided_batched<T, true>
                                                    : rocblas_iamax_strided_batched<T, false>;
-    auto rocblas_iamax_strided_batched_fn_64 = arg.api == FORTRAN
+    auto rocblas_iamax_strided_batched_fn_64 = arg.api & c_API_FORTRAN
                                                    ? rocblas_iamax_strided_batched_64<T, true>
                                                    : rocblas_iamax_strided_batched_64<T, false>;
 
@@ -299,11 +312,11 @@ void testing_iamax_strided_batched(const Arguments& arg)
 template <typename T>
 void testing_iamin_strided_batched(const Arguments& arg)
 {
-    auto rocblas_iamin_strided_batched_fn = arg.api == FORTRAN
+    auto rocblas_iamin_strided_batched_fn = arg.api & c_API_FORTRAN
                                                 ? rocblas_iamin_strided_batched<T, true>
                                                 : rocblas_iamin_strided_batched<T, false>;
 
-    auto rocblas_iamin_strided_batched_fn_64 = arg.api == FORTRAN
+    auto rocblas_iamin_strided_batched_fn_64 = arg.api & c_API_FORTRAN
                                                    ? rocblas_iamin_strided_batched_64<T, true>
                                                    : rocblas_iamin_strided_batched_64<T, false>;
 

@@ -131,9 +131,9 @@ Tests:
   precision: *single_double_precisions_complex
   uplo: [ U, L ]
   matrix_size: *small_matrix_size_range
-  incx: [ 1, -2, 13 ]
+  incx: [ -2 ]
   alpha_beta: *alpha_range
-  batch_count: [ 1, 5 ]
+  batch_count: [ 3 ]
 
 - name: hpr_batched_medium
   category: pre_checkin
@@ -153,8 +153,20 @@ Tests:
   matrix_size: *large_matrix_size_range
   incx: [ 1 ]
   alpha_beta: *alpha_range_small
-  batch_count: [ 1, 3 ]
+  batch_count: [ 3 ]
   pointer_mode_device: false
+
+- name: hpr_batched_grid_z_16bit
+  category: stress
+  arguments:
+    - { N:   3, incx: 1, batch_count: *c_grid_yz_require_passes} #generic kernel
+  uplo: [ U, L ]
+  alpha_beta: *alpha_range_small
+  pointer_mode_host: false
+  function:
+    - hpr_batched: *single_precision_complex
+    - hpr_strided_batched: *single_precision_complex
+  stride_scale: 1
 
 # strided batched
 - name: hpr_strided_batched_fortran
@@ -188,8 +200,8 @@ Tests:
   matrix_size: *small_matrix_size_range
   incx: [ 1, -2, 13 ]
   alpha_beta: *alpha_range
-  stride_scale: [ 1.0, 2.5 ]
-  batch_count: [ 1, 5 ]
+  stride_scale: [ 2.5 ]
+  batch_count: [ 3 ]
 
 - name: hpr_strided_batched_medium
   category: pre_checkin
@@ -211,7 +223,7 @@ Tests:
   incx: [ 1 ]
   alpha_beta: *alpha_range_small
   stride_scale: [ 1.0 ]
-  batch_count: [ 1, 3 ]
+  batch_count: [ 3 ]
   pointer_mode_host: false
 
 - name: hpr_64
@@ -265,5 +277,6 @@ Tests:
   initialization: hpl
   pointer_mode_host: false
   atomics_mode: 0
+  devices: 4
   repeatability_check: true
 ...

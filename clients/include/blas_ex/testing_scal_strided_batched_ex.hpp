@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2024 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2018-2025 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -27,10 +27,10 @@
 template <typename Ta, typename Tx = Ta, typename Tex = Tx>
 void testing_scal_strided_batched_ex_bad_arg(const Arguments& arg)
 {
-    auto rocblas_scal_strided_batched_ex_fn    = arg.api == FORTRAN
+    auto rocblas_scal_strided_batched_ex_fn    = arg.api & c_API_FORTRAN
                                                      ? rocblas_scal_strided_batched_ex_fortran
                                                      : rocblas_scal_strided_batched_ex;
-    auto rocblas_scal_strided_batched_ex_fn_64 = arg.api == FORTRAN
+    auto rocblas_scal_strided_batched_ex_fn_64 = arg.api & c_API_FORTRAN
                                                      ? rocblas_scal_strided_batched_ex_64_fortran
                                                      : rocblas_scal_strided_batched_ex_64;
 
@@ -49,8 +49,7 @@ void testing_scal_strided_batched_ex_bad_arg(const Arguments& arg)
     size_t size_x = N * size_t(incx);
 
     // allocate memory on device
-    device_vector<Tx> dx(size_x);
-    CHECK_DEVICE_ALLOCATION(dx.memcheck());
+    DEVICE_MEMCHECK(device_vector<Tx>, dx, (size_x));
 
     DAPI_EXPECT(
         rocblas_status_invalid_handle,
@@ -92,10 +91,10 @@ void testing_scal_strided_batched_ex_bad_arg(const Arguments& arg)
 template <typename Ta, typename Tx = Ta, typename Tex = Tx>
 void testing_scal_strided_batched_ex(const Arguments& arg)
 {
-    auto rocblas_scal_strided_batched_ex_fn    = arg.api == FORTRAN
+    auto rocblas_scal_strided_batched_ex_fn    = arg.api & c_API_FORTRAN
                                                      ? rocblas_scal_strided_batched_ex_fortran
                                                      : rocblas_scal_strided_batched_ex;
-    auto rocblas_scal_strided_batched_ex_fn_64 = arg.api == FORTRAN
+    auto rocblas_scal_strided_batched_ex_fn_64 = arg.api & c_API_FORTRAN
                                                      ? rocblas_scal_strided_batched_ex_64_fortran
                                                      : rocblas_scal_strided_batched_ex_64;
 
@@ -132,18 +131,14 @@ void testing_scal_strided_batched_ex(const Arguments& arg)
 
     // Naming: `h` is in CPU (host) memory(eg hx), `d` is in GPU (device) memory (eg dx).
     // Allocate host memory
-    host_strided_batch_vector<Tx> hx(N, incx, stridex, batch_count);
-    host_strided_batch_vector<Tx> hx_gold(N, incx, stridex, batch_count);
-    host_vector<Ta>               halpha(1);
+    HOST_MEMCHECK(host_strided_batch_vector<Tx>, hx, (N, incx, stridex, batch_count));
+    HOST_MEMCHECK(host_strided_batch_vector<Tx>, hx_gold, (N, incx, stridex, batch_count));
+    HOST_MEMCHECK(host_vector<Ta>, halpha, (1));
     halpha[0] = h_alpha;
 
     // allocate memory on device
-    device_strided_batch_vector<Tx> dx(N, incx, stridex, batch_count);
-    device_vector<Ta>               d_alpha(1);
-
-    // Check device memory allocation
-    CHECK_DEVICE_ALLOCATION(dx.memcheck());
-    CHECK_DEVICE_ALLOCATION(d_alpha.memcheck());
+    DEVICE_MEMCHECK(device_strided_batch_vector<Tx>, dx, (N, incx, stridex, batch_count));
+    DEVICE_MEMCHECK(device_vector<Ta>, d_alpha, (1));
 
     // Initialize the host vector.
     rocblas_init_vector(hx, arg, rocblas_client_alpha_sets_nan, true);
@@ -203,28 +198,53 @@ void testing_scal_strided_batched_ex(const Arguments& arg)
 
             if(arg.repeatability_check)
             {
-                host_strided_batch_vector<Tx> hx_copy(N, incx, stridex, batch_count);
-                CHECK_HIP_ERROR(hx_copy.memcheck());
+                HOST_MEMCHECK(
+                    host_strided_batch_vector<Tx>, hx_copy, (N, incx, stridex, batch_count));
 
                 CHECK_HIP_ERROR(hx.transfer_from(dx));
 
-                for(int i = 0; i < arg.iters; i++)
-                {
-                    CHECK_HIP_ERROR(dx.transfer_from(hx_gold));
-                    DAPI_CHECK(rocblas_scal_strided_batched_ex_fn,
-                               (handle,
-                                N,
-                                d_alpha,
-                                alpha_type,
-                                dx,
-                                x_type,
-                                incx,
-                                stridex,
-                                batch_count,
-                                execution_type));
+                // multi-GPU support
+                int device_id, device_count;
+                CHECK_HIP_ERROR(limit_device_count(device_count, (int)arg.devices));
 
-                    CHECK_HIP_ERROR(hx_copy.transfer_from(dx));
-                    unit_check_general<Tx>(1, N, incx, stridex, hx, hx_copy, batch_count);
+                for(int dev_id = 0; dev_id < device_count; dev_id++)
+                {
+                    CHECK_HIP_ERROR(hipGetDevice(&device_id));
+                    if(device_id != dev_id)
+                        CHECK_HIP_ERROR(hipSetDevice(dev_id));
+
+                    //New rocblas handle for new device
+                    rocblas_local_handle handle_copy{arg};
+
+                    //Allocate device memory in new device
+                    DEVICE_MEMCHECK(
+                        device_strided_batch_vector<Tx>, dx_copy, (N, incx, stridex, batch_count));
+                    DEVICE_MEMCHECK(device_vector<Ta>, d_alpha_copy, (1));
+
+                    CHECK_HIP_ERROR(d_alpha_copy.transfer_from(halpha));
+
+                    CHECK_ROCBLAS_ERROR(
+                        rocblas_set_pointer_mode(handle_copy, rocblas_pointer_mode_device));
+
+                    for(int runs = 0; runs < arg.iters; runs++)
+                    {
+                        CHECK_HIP_ERROR(dx_copy.transfer_from(hx_gold));
+
+                        DAPI_CHECK(rocblas_scal_strided_batched_ex_fn,
+                                   (handle_copy,
+                                    N,
+                                    d_alpha_copy,
+                                    alpha_type,
+                                    dx_copy,
+                                    x_type,
+                                    incx,
+                                    stridex,
+                                    batch_count,
+                                    execution_type));
+
+                        CHECK_HIP_ERROR(hx_copy.transfer_from(dx_copy));
+                        unit_check_general<Tx>(1, N, incx, stridex, hx, hx_copy, batch_count);
+                    }
                 }
                 return;
             }

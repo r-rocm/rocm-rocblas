@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2024 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2018-2025 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -28,15 +28,15 @@ template <typename T, bool CONJ>
 void testing_ger_strided_batched_bad_arg(const Arguments& arg)
 {
     auto rocblas_ger_strided_batched_fn
-        = arg.api == FORTRAN ? (CONJ ? rocblas_ger_strided_batched<T, true, true>
-                                     : rocblas_ger_strided_batched<T, false, true>)
-                             : (CONJ ? rocblas_ger_strided_batched<T, true, false>
-                                     : rocblas_ger_strided_batched<T, false, false>);
+        = arg.api & c_API_FORTRAN ? (CONJ ? rocblas_ger_strided_batched<T, true, true>
+                                          : rocblas_ger_strided_batched<T, false, true>)
+                                  : (CONJ ? rocblas_ger_strided_batched<T, true, false>
+                                          : rocblas_ger_strided_batched<T, false, false>);
     auto rocblas_ger_strided_batched_fn_64
-        = arg.api == FORTRAN_64 ? (CONJ ? rocblas_ger_strided_batched_64<T, true, true>
-                                        : rocblas_ger_strided_batched_64<T, false, true>)
-                                : (CONJ ? rocblas_ger_strided_batched_64<T, true, false>
-                                        : rocblas_ger_strided_batched_64<T, false, false>);
+        = arg.api & c_API_FORTRAN ? (CONJ ? rocblas_ger_strided_batched_64<T, true, true>
+                                          : rocblas_ger_strided_batched_64<T, false, true>)
+                                  : (CONJ ? rocblas_ger_strided_batched_64<T, true, false>
+                                          : rocblas_ger_strided_batched_64<T, false, false>);
 
     for(auto pointer_mode : {rocblas_pointer_mode_host, rocblas_pointer_mode_device})
     {
@@ -55,7 +55,8 @@ void testing_ger_strided_batched_bad_arg(const Arguments& arg)
         int64_t stride_y    = abs_incy * N;
         int64_t batch_count = 5;
 
-        device_vector<T> alpha_d(1), zero_d(1);
+        DEVICE_MEMCHECK(device_vector<T>, alpha_d, (1));
+        DEVICE_MEMCHECK(device_vector<T>, zero_d, (1));
 
         const T alpha_h(1), zero_h(0);
 
@@ -71,14 +72,9 @@ void testing_ger_strided_batched_bad_arg(const Arguments& arg)
         }
 
         // Allocate device memory
-        device_strided_batch_matrix<T> dA(M, N, lda, stride_a, batch_count);
-        device_strided_batch_vector<T> dx(M, incx, stride_x, batch_count);
-        device_strided_batch_vector<T> dy(N, incy, stride_y, batch_count);
-
-        // Check device memory allocation
-        CHECK_DEVICE_ALLOCATION(dA.memcheck());
-        CHECK_DEVICE_ALLOCATION(dx.memcheck());
-        CHECK_DEVICE_ALLOCATION(dy.memcheck());
+        DEVICE_MEMCHECK(device_strided_batch_matrix<T>, dA, (M, N, lda, stride_a, batch_count));
+        DEVICE_MEMCHECK(device_strided_batch_vector<T>, dx, (M, incx, stride_x, batch_count));
+        DEVICE_MEMCHECK(device_strided_batch_vector<T>, dy, (N, incy, stride_y, batch_count));
 
         DAPI_EXPECT(rocblas_status_invalid_handle,
                     rocblas_ger_strided_batched_fn,
@@ -242,15 +238,15 @@ template <typename T, bool CONJ>
 void testing_ger_strided_batched(const Arguments& arg)
 {
     auto rocblas_ger_strided_batched_fn
-        = arg.api == FORTRAN ? (CONJ ? rocblas_ger_strided_batched<T, true, true>
-                                     : rocblas_ger_strided_batched<T, false, true>)
-                             : (CONJ ? rocblas_ger_strided_batched<T, true, false>
-                                     : rocblas_ger_strided_batched<T, false, false>);
+        = arg.api & c_API_FORTRAN ? (CONJ ? rocblas_ger_strided_batched<T, true, true>
+                                          : rocblas_ger_strided_batched<T, false, true>)
+                                  : (CONJ ? rocblas_ger_strided_batched<T, true, false>
+                                          : rocblas_ger_strided_batched<T, false, false>);
     auto rocblas_ger_strided_batched_fn_64
-        = arg.api == FORTRAN_64 ? (CONJ ? rocblas_ger_strided_batched_64<T, true, true>
-                                        : rocblas_ger_strided_batched_64<T, false, true>)
-                                : (CONJ ? rocblas_ger_strided_batched_64<T, true, false>
-                                        : rocblas_ger_strided_batched_64<T, false, false>);
+        = arg.api & c_API_FORTRAN ? (CONJ ? rocblas_ger_strided_batched_64<T, true, true>
+                                          : rocblas_ger_strided_batched_64<T, false, true>)
+                                  : (CONJ ? rocblas_ger_strided_batched_64<T, true, false>
+                                          : rocblas_ger_strided_batched_64<T, false, false>);
 
     int64_t M           = arg.M;
     int64_t N           = arg.N;
@@ -292,28 +288,18 @@ void testing_ger_strided_batched(const Arguments& arg)
 
     // Naming: `h` is in CPU (host) memory(eg hA), `d` is in GPU (device) memory (eg dA).
     // Allocate host memory
-    host_strided_batch_matrix<T> hA(M, N, lda, stride_a, batch_count);
-    host_strided_batch_matrix<T> hA_gold(M, N, lda, stride_a, batch_count);
-    host_strided_batch_vector<T> hx(M, incx, stride_x, batch_count);
-    host_strided_batch_vector<T> hy(N, incy, stride_y, batch_count);
-    host_vector<T>               halpha(1);
+    HOST_MEMCHECK(host_strided_batch_matrix<T>, hA, (M, N, lda, stride_a, batch_count));
+    HOST_MEMCHECK(host_strided_batch_matrix<T>, hA_gold, (M, N, lda, stride_a, batch_count));
+    HOST_MEMCHECK(host_strided_batch_vector<T>, hx, (M, incx, stride_x, batch_count));
+    HOST_MEMCHECK(host_strided_batch_vector<T>, hy, (N, incy, stride_y, batch_count));
+    HOST_MEMCHECK(host_vector<T>, halpha, (1));
     halpha[0] = h_alpha;
 
-    // Check host memory allocation
-    CHECK_HIP_ERROR(hA.memcheck());
-    CHECK_HIP_ERROR(hA_gold.memcheck());
-
     // Allocate device memory
-    device_strided_batch_matrix<T> dA(M, N, lda, stride_a, batch_count);
-    device_strided_batch_vector<T> dx(M, incx, stride_x, batch_count);
-    device_strided_batch_vector<T> dy(N, incy, stride_y, batch_count);
-    device_vector<T>               d_alpha(1);
-
-    // Check device memory allocation
-    CHECK_DEVICE_ALLOCATION(dA.memcheck());
-    CHECK_DEVICE_ALLOCATION(dx.memcheck());
-    CHECK_DEVICE_ALLOCATION(dy.memcheck());
-    CHECK_DEVICE_ALLOCATION(d_alpha.memcheck());
+    DEVICE_MEMCHECK(device_strided_batch_matrix<T>, dA, (M, N, lda, stride_a, batch_count));
+    DEVICE_MEMCHECK(device_strided_batch_vector<T>, dx, (M, incx, stride_x, batch_count));
+    DEVICE_MEMCHECK(device_strided_batch_vector<T>, dy, (N, incy, stride_y, batch_count));
+    DEVICE_MEMCHECK(device_vector<T>, d_alpha, (1));
 
     // Initialize data on host memory
     rocblas_init_matrix(hA, arg, rocblas_client_never_set_nan, rocblas_client_general_matrix, true);
@@ -384,30 +370,60 @@ void testing_ger_strided_batched(const Arguments& arg)
 
             if(arg.repeatability_check)
             {
-                host_strided_batch_matrix<T> hA_copy(M, N, lda, stride_a, batch_count);
-                CHECK_HIP_ERROR(hA_copy.memcheck());
+                HOST_MEMCHECK(
+                    host_strided_batch_matrix<T>, hA_copy, (M, N, lda, stride_a, batch_count));
                 CHECK_HIP_ERROR(hA.transfer_from(dA));
 
-                for(int i = 0; i < arg.iters; i++)
+                // multi-GPU support
+                int device_id, device_count;
+                CHECK_HIP_ERROR(limit_device_count(device_count, (int)arg.devices));
+
+                for(int dev_id = 0; dev_id < device_count; dev_id++)
                 {
-                    CHECK_HIP_ERROR(dA.transfer_from(hA_gold));
-                    DAPI_CHECK(rocblas_ger_strided_batched_fn,
-                               (handle,
-                                M,
-                                N,
-                                d_alpha,
-                                dx,
-                                incx,
-                                stride_x,
-                                dy,
-                                incy,
-                                stride_y,
-                                dA,
-                                lda,
-                                stride_a,
-                                batch_count));
-                    CHECK_HIP_ERROR(hA_copy.transfer_from(dA));
-                    unit_check_general<T>(M, N, lda, stride_a, hA, hA_copy, batch_count);
+                    CHECK_HIP_ERROR(hipGetDevice(&device_id));
+                    if(device_id != dev_id)
+                        CHECK_HIP_ERROR(hipSetDevice(dev_id));
+
+                    //New rocblas handle for new device
+                    rocblas_local_handle handle_copy{arg};
+                    // Allocate device memory in new device
+                    DEVICE_MEMCHECK(device_strided_batch_matrix<T>,
+                                    dA_copy,
+                                    (M, N, lda, stride_a, batch_count));
+                    DEVICE_MEMCHECK(
+                        device_strided_batch_vector<T>, dx_copy, (M, incx, stride_x, batch_count));
+                    DEVICE_MEMCHECK(
+                        device_strided_batch_vector<T>, dy_copy, (N, incy, stride_y, batch_count));
+                    DEVICE_MEMCHECK(device_vector<T>, d_alpha_copy, (1));
+
+                    CHECK_HIP_ERROR(dx_copy.transfer_from(hx));
+                    CHECK_HIP_ERROR(dy_copy.transfer_from(hy));
+                    CHECK_HIP_ERROR(d_alpha_copy.transfer_from(halpha));
+
+                    CHECK_ROCBLAS_ERROR(
+                        rocblas_set_pointer_mode(handle_copy, rocblas_pointer_mode_device));
+
+                    for(int runs = 0; runs < arg.iters; runs++)
+                    {
+                        CHECK_HIP_ERROR(dA_copy.transfer_from(hA_gold));
+                        DAPI_CHECK(rocblas_ger_strided_batched_fn,
+                                   (handle_copy,
+                                    M,
+                                    N,
+                                    d_alpha_copy,
+                                    dx_copy,
+                                    incx,
+                                    stride_x,
+                                    dy_copy,
+                                    incy,
+                                    stride_y,
+                                    dA_copy,
+                                    lda,
+                                    stride_a,
+                                    batch_count));
+                        CHECK_HIP_ERROR(hA_copy.transfer_from(dA_copy));
+                        unit_check_general<T>(M, N, lda, stride_a, hA, hA_copy, batch_count);
+                    }
                 }
                 return;
             }

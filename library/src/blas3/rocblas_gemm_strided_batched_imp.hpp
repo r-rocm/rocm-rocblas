@@ -84,8 +84,9 @@ namespace
             rocblas_copy_alpha_beta_to_host_if_on_device(handle, alpha, beta, alpha_h, beta_h, k));
         auto saved_pointer_mode = handle->push_pointer_mode(rocblas_pointer_mode_host);
 
-        auto layer_mode     = handle->layer_mode;
-        auto check_numerics = handle->check_numerics;
+        auto   layer_mode     = handle->layer_mode;
+        auto   check_numerics = handle->check_numerics;
+        Logger logger;
         if(layer_mode
            & (rocblas_layer_mode_log_trace | rocblas_layer_mode_log_bench
               | rocblas_layer_mode_log_profile))
@@ -94,95 +95,95 @@ namespace
             auto trans_b_letter = rocblas_transpose_letter(trans_b);
 
             if(layer_mode & rocblas_layer_mode_log_trace)
-                log_trace(handle,
-                          rocblas_gemm_strided_batched_name<T>,
-                          trans_a,
-                          trans_b,
-                          m,
-                          n,
-                          k,
-                          LOG_TRACE_SCALAR_VALUE(handle, alpha),
-                          A,
-                          lda,
-                          stride_a,
-                          B,
-                          ldb,
-                          stride_b,
-                          LOG_TRACE_SCALAR_VALUE(handle, beta),
-                          C,
-                          ldc,
-                          stride_c,
-                          batch_count);
+                logger.log_trace(handle,
+                                 rocblas_gemm_strided_batched_name<T>,
+                                 trans_a,
+                                 trans_b,
+                                 m,
+                                 n,
+                                 k,
+                                 LOG_TRACE_SCALAR_VALUE(handle, alpha),
+                                 A,
+                                 lda,
+                                 stride_a,
+                                 B,
+                                 ldb,
+                                 stride_b,
+                                 LOG_TRACE_SCALAR_VALUE(handle, beta),
+                                 C,
+                                 ldc,
+                                 stride_c,
+                                 batch_count);
 
             if(layer_mode & rocblas_layer_mode_log_bench)
             {
-                log_bench(handle,
-                          ROCBLAS_API_BENCH " -f gemm_strided_batched -r",
-                          rocblas_precision_string<T>,
-                          "--transposeA",
-                          trans_a_letter,
-                          "--transposeB",
-                          trans_b_letter,
-                          "-m",
-                          m,
-                          "-n",
-                          n,
-                          "-k",
-                          k,
-                          LOG_BENCH_SCALAR_VALUE(handle, alpha),
-                          "--lda",
-                          lda,
-                          "--stride_a",
-                          stride_a,
-                          "--ldb",
-                          ldb,
-                          "--stride_b",
-                          stride_b,
-                          LOG_BENCH_SCALAR_VALUE(handle, beta),
-                          "--ldc",
-                          ldc,
-                          "--stride_c",
-                          stride_c,
-                          "--batch_count",
-                          batch_count);
+                logger.log_bench(handle,
+                                 ROCBLAS_API_BENCH " -f gemm_strided_batched -r",
+                                 rocblas_precision_string<T>,
+                                 "--transposeA",
+                                 trans_a_letter,
+                                 "--transposeB",
+                                 trans_b_letter,
+                                 "-m",
+                                 m,
+                                 "-n",
+                                 n,
+                                 "-k",
+                                 k,
+                                 LOG_BENCH_SCALAR_VALUE(handle, alpha),
+                                 "--lda",
+                                 lda,
+                                 "--stride_a",
+                                 stride_a,
+                                 "--ldb",
+                                 ldb,
+                                 "--stride_b",
+                                 stride_b,
+                                 LOG_BENCH_SCALAR_VALUE(handle, beta),
+                                 "--ldc",
+                                 ldc,
+                                 "--stride_c",
+                                 stride_c,
+                                 "--batch_count",
+                                 batch_count);
             }
 
             if(layer_mode & rocblas_layer_mode_log_profile)
             {
-                log_profile(handle,
-                            rocblas_gemm_strided_batched_name<T>,
-                            "transA",
-                            trans_a_letter,
-                            "transB",
-                            trans_b_letter,
-                            "M",
-                            m,
-                            "N",
-                            n,
-                            "K",
-                            k,
-                            "alpha",
-                            value_category(*alpha),
-                            "lda",
-                            lda,
-                            "stride_a",
-                            stride_a,
-                            "ldb",
-                            ldb,
-                            "stride_b",
-                            stride_b,
-                            "beta",
-                            value_category(*beta),
-                            "ldc",
-                            ldc,
-                            "stride_c",
-                            stride_c,
-                            "batch_count",
-                            batch_count);
+                logger.log_profile(handle,
+                                   rocblas_gemm_strided_batched_name<T>,
+                                   "transA",
+                                   trans_a_letter,
+                                   "transB",
+                                   trans_b_letter,
+                                   "M",
+                                   m,
+                                   "N",
+                                   n,
+                                   "K",
+                                   k,
+                                   "alpha",
+                                   value_category(*alpha),
+                                   "lda",
+                                   lda,
+                                   "stride_a",
+                                   stride_a,
+                                   "ldb",
+                                   ldb,
+                                   "stride_b",
+                                   stride_b,
+                                   "beta",
+                                   value_category(*beta),
+                                   "ldc",
+                                   ldc,
+                                   "stride_c",
+                                   stride_c,
+                                   "batch_count",
+                                   batch_count);
             }
         }
 
-        auto validArgs = rocblas_validateArgs(
+        auto validArgs = rocblas_gemm_arg_check(
             handle, trans_a, trans_b, m, n, k, alpha, A, lda, B, ldb, beta, C, ldc, batch_count);
 
         if(validArgs != rocblas_status_continue)
@@ -339,77 +340,3 @@ namespace
     IMPL(ROCBLAS_API(rocblas_cgemm_strided_batched), TI_, rocblas_float_complex);  \
     IMPL(ROCBLAS_API(rocblas_zgemm_strided_batched), TI_, rocblas_double_complex); \
     } // extern "C"
-
-/*******************************************************************************
- * Strided Batched GEMM Kernel name APIs
- ******************************************************************************/
-
-extern "C" {
-
-rocblas_status rocblas_hgemm_strided_batched_kernel_name(rocblas_handle      handle,
-                                                         rocblas_operation   trans_a,
-                                                         rocblas_operation   trans_b,
-                                                         rocblas_int         m,
-                                                         rocblas_int         n,
-                                                         rocblas_int         k,
-                                                         const rocblas_half* alpha,
-                                                         const rocblas_half* A,
-                                                         rocblas_int         lda,
-                                                         rocblas_stride      stride_a,
-                                                         const rocblas_half* B,
-                                                         rocblas_int         ldb,
-                                                         rocblas_stride      stride_b,
-                                                         const rocblas_half* beta,
-                                                         rocblas_half*       C,
-                                                         rocblas_int         ldc,
-                                                         rocblas_stride      stride_c,
-                                                         rocblas_int         batch_count)
-{
-    return rocblas_status_not_implemented;
-}
-
-rocblas_status rocblas_sgemm_strided_batched_kernel_name(rocblas_handle    handle,
-                                                         rocblas_operation trans_a,
-                                                         rocblas_operation trans_b,
-                                                         rocblas_int       m,
-                                                         rocblas_int       n,
-                                                         rocblas_int       k,
-                                                         const float*      alpha,
-                                                         const float*      A,
-                                                         rocblas_int       lda,
-                                                         rocblas_stride    stride_a,
-                                                         const float*      B,
-                                                         rocblas_int       ldb,
-                                                         rocblas_stride    stride_b,
-                                                         const float*      beta,
-                                                         float*            C,
-                                                         rocblas_int       ldc,
-                                                         rocblas_stride    stride_c,
-                                                         rocblas_int       batch_count)
-{
-    return rocblas_status_not_implemented;
-}
-
-rocblas_status rocblas_dgemm_strided_batched_kernel_name(rocblas_handle    handle,
-                                                         rocblas_operation trans_a,
-                                                         rocblas_operation trans_b,
-                                                         rocblas_int       m,
-                                                         rocblas_int       n,
-                                                         rocblas_int       k,
-                                                         const double*     alpha,
-                                                         const double*     A,
-                                                         rocblas_int       lda,
-                                                         rocblas_stride    stride_a,
-                                                         const double*     B,
-                                                         rocblas_int       ldb,
-                                                         rocblas_stride    stride_b,
-                                                         const double*     beta,
-                                                         double*           C,
-                                                         rocblas_int       ldc,
-                                                         rocblas_stride    stride_c,
-                                                         rocblas_int       batch_count)
-{
-    return rocblas_status_not_implemented;
-}
-
-} // extern "C"

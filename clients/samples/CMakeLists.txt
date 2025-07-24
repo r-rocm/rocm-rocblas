@@ -22,7 +22,7 @@
 
 set( rocblas_samples_common
       ../common/singletons.cpp
-      ../common/utility.cpp
+      ../common/client_utility.cpp
       ../common/rocblas_random.cpp
       ../common/host_alloc.cpp
     )
@@ -37,12 +37,13 @@ set( sample_list_c rocblas-example-c-dgeam )
 # C++ examples
 add_executable( rocblas-example-sscal example_sscal.cpp ${rocblas_samples_common} )
 add_executable( rocblas-example-scal-template example_scal_template.cpp ${rocblas_samples_common} )
+add_executable( rocblas-example-scal-multiple-strided-batch example_scal_multiple_strided_batch.cpp ${rocblas_samples_common} )
 add_executable( rocblas-example-solver example_solver_rocblas.cpp ${rocblas_samples_common} )
 add_executable( rocblas-example-hip-complex-her2 example_hip_complex_her2.cpp )
 add_executable( rocblas-example-gemv-graph-capture example_gemv_graph_capture.cpp )
 add_executable( rocblas-example-header-check example_header_check.cpp)
 
-set( sample_list_base rocblas-example-sscal rocblas-example-scal-template rocblas-example-solver rocblas-example-hip-complex-her2 rocblas-example-gemv-graph-capture rocblas-example-header-check)
+set( sample_list_base rocblas-example-sscal rocblas-example-scal-template rocblas-example-scal-multiple-strided-batch rocblas-example-solver rocblas-example-hip-complex-her2 rocblas-example-gemv-graph-capture rocblas-example-header-check)
 
 if ( BUILD_FORTRAN_CLIENTS )
   # Fortran examples
@@ -82,6 +83,10 @@ endforeach( )
 foreach( exe ${sample_list_all} )
   target_link_libraries( ${exe} PRIVATE roc::rocblas Threads::Threads )
 
+  if( NOT BUILD_SHARED_LIBS )
+    target_compile_definitions(${exe} PRIVATE ROCBLAS_STATIC_LIB)
+  endif()
+  
   if( NOT ${exe} STREQUAL "rocblas-example-header-check" )
     set_target_properties( ${exe} PROPERTIES
     CXX_STANDARD 14
@@ -115,8 +120,6 @@ foreach( exe ${sample_list_all} )
       )
 
   if( CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    # GCC or hip-clang needs specific flags to turn on f16c intrinsics
-    target_compile_options( ${exe} PRIVATE -mf16c )
     target_compile_definitions( ${exe} PRIVATE ROCBLAS_INTERNAL_API )
   endif( )
 

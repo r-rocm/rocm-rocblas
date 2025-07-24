@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2023 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2018-2024 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -23,12 +23,7 @@
 #pragma once
 
 #define ROCBLAS_BETA_FEATURES_API
-#include "../../library/src/include/handle.hpp"
-#include "rocblas.hpp"
-#include "rocblas_matrix.hpp"
-#include "rocblas_test.hpp"
-#include "rocblas_vector.hpp"
-#include "utility.hpp"
+#include "testing_common.hpp"
 
 template <typename Ti, typename To, typename Tc>
 void testing_gemm_ex_get_solutions(const Arguments& arg)
@@ -98,24 +93,17 @@ void testing_gemm_ex_get_solutions(const Arguments& arg)
     }
 
     // Allocate device memory
-    device_matrix<Ti> dA(A_row, A_col, lda);
-    device_matrix<Ti> dB(B_row, B_col, ldb);
+    DEVICE_MEMCHECK(device_matrix<Ti>, dA, (A_row, A_col, lda));
+    DEVICE_MEMCHECK(device_matrix<Ti>, dB, (B_row, B_col, ldb));
     // if C!=D, allocate C and D normally
     // if C==D, allocate C big enough for the larger of C and D; D points to C
-    device_matrix<To> dC(M, N, ldc);
+    DEVICE_MEMCHECK(device_matrix<To>, dC, (M, N, ldc));
     device_matrix<To> dD
         = (arg.outofplace) ? device_matrix<To>(M, N, ldd) : device_matrix<To>(0, 1, 1);
-    device_matrix<To>& dDref = (arg.outofplace) ? dD : dC;
-    device_vector<Tc>  d_alpha_Tc(1);
-    device_vector<Tc>  d_beta_Tc(1);
-
-    // Check device memory allocation
-    CHECK_DEVICE_ALLOCATION(dA.memcheck());
-    CHECK_DEVICE_ALLOCATION(dB.memcheck());
-    CHECK_DEVICE_ALLOCATION(dC.memcheck());
     CHECK_DEVICE_ALLOCATION(dD.memcheck());
-    CHECK_DEVICE_ALLOCATION(d_alpha_Tc.memcheck());
-    CHECK_DEVICE_ALLOCATION(d_beta_Tc.memcheck());
+    device_matrix<To>& dDref = (arg.outofplace) ? dD : dC;
+    DEVICE_MEMCHECK(device_vector<Tc>, d_alpha_Tc, (1));
+    DEVICE_MEMCHECK(device_vector<Tc>, d_beta_Tc, (1));
 
 #define GEMM_EX_ARGS                                                                        \
     handle, transA, transB, M, N, K, &h_alpha_Tc, dA, arg.a_type, lda, dB, arg.b_type, ldb, \
@@ -129,6 +117,9 @@ void testing_gemm_ex_get_solutions(const Arguments& arg)
 
     rocblas_int              size_large = size * 2;
     std::vector<rocblas_int> ary(size_large, -1);
+
+    if(size == 0)
+        GTEST_SKIP() << "Backend returning 0 valid solutions";
 
     if(size >= 2)
     {
@@ -164,8 +155,11 @@ void testing_gemm_ex_get_solutions(const Arguments& arg)
             max = sol;
     }
 
+// TODO: weaken solution constraint tests until solutions can be associated with backend
+#ifndef BUILD_WITH_HIPBLASLT
     EXPECT_ROCBLAS_STATUS(rocblas_gemm_exM(GEMM_EX_ARGS, max + 1, rocblas_gemm_flags_none),
                           rocblas_status_invalid_value);
+#endif
 
     // Testing get solutions by type - should be superset of solutions that solve problem
     rocblas_int size_type;
@@ -186,6 +180,7 @@ void testing_gemm_ex_get_solutions(const Arguments& arg)
                                                               ary_type.data(),
                                                               &size_type));
 
+#ifndef BUILD_WITH_HIPBLASLT
     std::vector<rocblas_int> valid_ary(ary.begin(), ary.begin() + size); // Trim off junk values
     std::sort(ary_type.begin(), ary_type.end());
     std::sort(valid_ary.begin(), valid_ary.end());
@@ -193,4 +188,5 @@ void testing_gemm_ex_get_solutions(const Arguments& arg)
     bool ary_is_subset
         = std::includes(ary_type.begin(), ary_type.end(), valid_ary.begin(), valid_ary.end());
     EXPECT_TRUE(ary_is_subset);
+#endif
 }

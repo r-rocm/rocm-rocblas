@@ -14,10 +14,11 @@ def runCI =
     nodeDetails, jobName->
 
     def prj = new rocProject('rocBLAS', 'StaticLibrary')
+
     // customize for project
     prj.paths.build_command = './install.sh -c --static'
 
-    prj.defaults.ccache = true
+    prj.defaults.ccache = false
     prj.timeout.compile = 480
 
     // Define test architectures, optional rocm version argument is available

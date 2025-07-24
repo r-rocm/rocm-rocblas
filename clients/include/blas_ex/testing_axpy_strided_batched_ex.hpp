@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2024 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2018-2025 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -28,10 +28,10 @@
 template <typename Ta, typename Tx = Ta, typename Ty = Tx, typename Tex = Ty>
 void testing_axpy_strided_batched_ex_bad_arg(const Arguments& arg)
 {
-    auto rocblas_axpy_strided_batched_ex_fn    = arg.api == FORTRAN
+    auto rocblas_axpy_strided_batched_ex_fn    = arg.api & c_API_FORTRAN
                                                      ? rocblas_axpy_strided_batched_ex_fortran
                                                      : rocblas_axpy_strided_batched_ex;
-    auto rocblas_axpy_strided_batched_ex_fn_64 = arg.api == FORTRAN_64
+    auto rocblas_axpy_strided_batched_ex_fn_64 = arg.api & c_API_FORTRAN
                                                      ? rocblas_axpy_strided_batched_ex_64_fortran
                                                      : rocblas_axpy_strided_batched_ex_64;
 
@@ -49,7 +49,8 @@ void testing_axpy_strided_batched_ex_bad_arg(const Arguments& arg)
 
         rocblas_stride stridex = arg.stride_x, stridey = arg.stride_y;
 
-        device_vector<Ta> alpha_d(1), zero_d(1);
+        DEVICE_MEMCHECK(device_vector<Ta>, alpha_d, (1));
+        DEVICE_MEMCHECK(device_vector<Ta>, zero_d, (1));
 
         const Ta alpha_h(1), zero_h(0);
 
@@ -64,11 +65,8 @@ void testing_axpy_strided_batched_ex_bad_arg(const Arguments& arg)
             zero = zero_d;
         }
 
-        device_strided_batch_vector<Tx> dx(10, 1, 10, 2);
-        device_strided_batch_vector<Ty> dy(10, 1, 10, 2);
-
-        CHECK_DEVICE_ALLOCATION(dx.memcheck());
-        CHECK_DEVICE_ALLOCATION(dy.memcheck());
+        DEVICE_MEMCHECK(device_strided_batch_vector<Tx>, dx, (10, 1, 10, 2));
+        DEVICE_MEMCHECK(device_strided_batch_vector<Ty>, dy, (10, 1, 10, 2));
 
         DAPI_EXPECT(rocblas_status_invalid_handle,
                     rocblas_axpy_strided_batched_ex_fn,
@@ -200,10 +198,10 @@ void testing_axpy_strided_batched_ex_bad_arg(const Arguments& arg)
 template <typename Ta, typename Tx = Ta, typename Ty = Tx, typename Tex = Ty>
 void testing_axpy_strided_batched_ex(const Arguments& arg)
 {
-    auto rocblas_axpy_strided_batched_ex_fn    = arg.api == FORTRAN
+    auto rocblas_axpy_strided_batched_ex_fn    = arg.api & c_API_FORTRAN
                                                      ? rocblas_axpy_strided_batched_ex_fortran
                                                      : rocblas_axpy_strided_batched_ex;
-    auto rocblas_axpy_strided_batched_ex_fn_64 = arg.api == FORTRAN_64
+    auto rocblas_axpy_strided_batched_ex_fn_64 = arg.api & c_API_FORTRAN
                                                      ? rocblas_axpy_strided_batched_ex_64_fortran
                                                      : rocblas_axpy_strided_batched_ex_64;
 
@@ -254,29 +252,18 @@ void testing_axpy_strided_batched_ex(const Arguments& arg)
 
     // Naming: `h` is in CPU (host) memory(eg hx), `d` is in GPU (device) memory (eg dx).
     // Allocate host memory
-    host_strided_batch_vector<Tx> hx(N, incx, stridex, batch_count);
-    host_strided_batch_vector<Ty> hy(N, incy, stridey, batch_count),
-        hy1(N, incy, stridey, batch_count), hy2(N, incy, stridey, batch_count);
-    host_strided_batch_vector<Tex> hx_ex(N, incx, stridex, batch_count);
-    host_strided_batch_vector<Tex> hy_ex(N, incy, stridey, batch_count);
-    host_vector<Ta>                halpha(1);
-
-    // Check host memory allocation
-    CHECK_HIP_ERROR(hx.memcheck());
-    CHECK_HIP_ERROR(hy.memcheck());
-    CHECK_HIP_ERROR(hy1.memcheck());
-    CHECK_HIP_ERROR(hy2.memcheck());
-    CHECK_HIP_ERROR(halpha.memcheck());
+    HOST_MEMCHECK(host_strided_batch_vector<Tx>, hx, (N, incx, stridex, batch_count));
+    HOST_MEMCHECK(host_strided_batch_vector<Ty>, hy, (N, incy, stridey, batch_count));
+    HOST_MEMCHECK(host_strided_batch_vector<Ty>, hy1, (N, incy, stridey, batch_count));
+    HOST_MEMCHECK(host_strided_batch_vector<Ty>, hy2, (N, incy, stridey, batch_count));
+    HOST_MEMCHECK(host_strided_batch_vector<Tex>, hx_ex, (N, incx, stridex, batch_count));
+    HOST_MEMCHECK(host_strided_batch_vector<Tex>, hy_ex, (N, incy, stridey, batch_count));
+    HOST_MEMCHECK(host_vector<Ta>, halpha, (1));
 
     // Allocate device memory
-    device_strided_batch_vector<Tx> dx(N, incx, stridex, batch_count);
-    device_strided_batch_vector<Ty> dy(N, incy, stridey, batch_count);
-    device_vector<Ta>               dalpha(1);
-
-    // Check device memory allocation
-    CHECK_DEVICE_ALLOCATION(dx.memcheck());
-    CHECK_DEVICE_ALLOCATION(dy.memcheck());
-    CHECK_DEVICE_ALLOCATION(dalpha.memcheck());
+    DEVICE_MEMCHECK(device_strided_batch_vector<Tx>, dx, (N, incx, stridex, batch_count));
+    DEVICE_MEMCHECK(device_strided_batch_vector<Ty>, dy, (N, incy, stridey, batch_count));
+    DEVICE_MEMCHECK(device_vector<Ta>, dalpha, (1));
 
     halpha[0] = h_alpha;
 
@@ -300,7 +287,6 @@ void testing_axpy_strided_batched_ex(const Arguments& arg)
 
     if(arg.unit_check || arg.norm_check)
     {
-
         // Transfer host to device
         CHECK_HIP_ERROR(dx.transfer_from(hx));
 
@@ -364,28 +350,57 @@ void testing_axpy_strided_batched_ex(const Arguments& arg)
 
             if(arg.repeatability_check)
             {
-                host_strided_batch_vector<Ty> hy_copy(N, incx, stridex, batch_count);
-                CHECK_HIP_ERROR(hy_copy.memcheck());
-                for(int i = 0; i < arg.iters; i++)
+                HOST_MEMCHECK(
+                    host_strided_batch_vector<Ty>, hy_copy, (N, incx, stridex, batch_count));
+
+                // multi-GPU support
+                int device_id, device_count;
+                CHECK_HIP_ERROR(limit_device_count(device_count, (int)arg.devices));
+
+                for(int dev_id = 0; dev_id < device_count; dev_id++)
                 {
-                    CHECK_HIP_ERROR(dy.transfer_from(hy));
-                    DAPI_DISPATCH(rocblas_axpy_strided_batched_ex_fn,
-                                  (handle,
-                                   N,
-                                   dalpha,
-                                   alpha_type,
-                                   dx,
-                                   x_type,
-                                   incx,
-                                   stridex,
-                                   dy,
-                                   y_type,
-                                   incy,
-                                   stridey,
-                                   batch_count,
-                                   execution_type));
-                    CHECK_HIP_ERROR(hy_copy.transfer_from(dy));
-                    unit_check_general<Ty>(1, N, incy, stridey, hy2, hy_copy, batch_count);
+                    CHECK_HIP_ERROR(hipGetDevice(&device_id));
+                    if(device_id != dev_id)
+                        CHECK_HIP_ERROR(hipSetDevice(dev_id));
+
+                    //New rocblas handle for new device
+                    rocblas_local_handle handle_copy{arg};
+
+                    //Allocate device memory in new device
+                    DEVICE_MEMCHECK(
+                        device_strided_batch_vector<Tx>, dx_copy, (N, incx, stridex, batch_count));
+                    DEVICE_MEMCHECK(
+                        device_strided_batch_vector<Ty>, dy_copy, (N, incy, stridey, batch_count));
+                    DEVICE_MEMCHECK(device_vector<Ta>, dalpha_copy, (1));
+
+                    // copy data from CPU to device
+                    CHECK_HIP_ERROR(dx_copy.transfer_from(hx));
+                    CHECK_HIP_ERROR(dalpha_copy.transfer_from(halpha));
+
+                    CHECK_ROCBLAS_ERROR(
+                        rocblas_set_pointer_mode(handle_copy, rocblas_pointer_mode_device));
+
+                    for(int runs = 0; runs < arg.iters; runs++)
+                    {
+                        CHECK_HIP_ERROR(dy_copy.transfer_from(hy));
+                        DAPI_DISPATCH(rocblas_axpy_strided_batched_ex_fn,
+                                      (handle_copy,
+                                       N,
+                                       dalpha_copy,
+                                       alpha_type,
+                                       dx_copy,
+                                       x_type,
+                                       incx,
+                                       stridex,
+                                       dy_copy,
+                                       y_type,
+                                       incy,
+                                       stridey,
+                                       batch_count,
+                                       execution_type));
+                        CHECK_HIP_ERROR(hy_copy.transfer_from(dy_copy));
+                        unit_check_general<Ty>(1, N, incy, stridey, hy2, hy_copy, batch_count);
+                    }
                 }
                 return;
             }

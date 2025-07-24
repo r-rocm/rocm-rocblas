@@ -22,8 +22,13 @@
 #include "handle.hpp"
 #include <cstdarg>
 #include <limits>
+
 #ifdef WIN32
 #include <windows.h>
+#endif
+
+#ifdef BUILD_WITH_HIPBLASLT
+#include <hipblaslt/hipblaslt.h>
 #endif
 
 #if BUILD_WITH_TENSILE
@@ -145,6 +150,14 @@ static Processor getActiveArch(int deviceId)
     {
         return Processor::gfx1151;
     }
+    else if(deviceString.find("gfx1200") != std::string::npos)
+    {
+        return Processor::gfx1200;
+    }
+    else if(deviceString.find("gfx1201") != std::string::npos)
+    {
+        return Processor::gfx1201;
+    }
     return static_cast<Processor>(0);
 }
 
@@ -234,6 +247,38 @@ _rocblas_handle::_rocblas_handle()
 
     // Initialize numerical checking
     init_check_numerics();
+
+#ifdef BUILD_WITH_HIPBLASLT
+    const char* hipblasltEnvVal = read_env("ROCBLAS_USE_HIPBLASLT");
+
+    if(hipblasltEnvVal)
+    {
+        if(strncmp(hipblasltEnvVal, "1", 1) == 0)
+        {
+            hipblasltEnvVar = 1;
+        }
+        else
+        {
+            hipblasltEnvVar = 0;
+        }
+    }
+    else
+    {
+        hipblasltEnvVar = -1;
+    }
+
+    if(useHipBLASLt())
+    {
+        hipblasLtHandle                = std::make_shared<hipblasLtHandle_t>();
+        hipblasStatus_t hipblas_status = hipblasLtCreate(&(*hipblasLtHandle));
+        if(HIPBLAS_STATUS_SUCCESS != hipblas_status)
+        {
+            rocblas_cerr << "rocBLAS internal error: Unable to initialize hipblaslt: "
+                         << hipblas_status << std::endl;
+            rocblas_abort();
+        }
+    }
+#endif
 }
 
 /*******************************************************************************
@@ -308,6 +353,20 @@ _rocblas_handle::~_rocblas_handle()
 #endif
         }
     }
+
+#ifdef BUILD_WITH_HIPBLASLT
+    if(hipblasLtHandle.unique())
+    {
+        hipblasStatus_t hipblas_status = hipblasLtDestroy(*hipblasLtHandle);
+        if(HIPBLAS_STATUS_SUCCESS != hipblas_status)
+        {
+            rocblas_cerr << "rocBLAS internal error: Unable to destroy hipblaslt: "
+                         << hipblas_status << std::endl;
+            rocblas_abort();
+        }
+        hipblasLtHandle.reset();
+    }
+#endif
 }
 
 /*******************************************************************************
@@ -349,6 +408,40 @@ bool _rocblas_handle::device_allocator(size_t size)
     return success;
 }
 #endif
+
+/*******************************************************************************
+ * Set the external data packet pointer
+ ******************************************************************************/
+ROCBLAS_INTERNAL_EXPORT_NOINLINE rocblas_status
+    rocblas_internal_set_data_ptr(rocblas_handle handle, std::shared_ptr<void>& data_ptr)
+try
+{
+    if(!handle)
+        return rocblas_status_invalid_handle;
+    handle->set_data_ptr(data_ptr);
+    return rocblas_status_success;
+}
+catch(...)
+{
+    return exception_to_rocblas_status();
+}
+
+/*******************************************************************************
+ * Get the external data packet pointer
+ ******************************************************************************/
+ROCBLAS_INTERNAL_EXPORT_NOINLINE rocblas_status
+    rocblas_internal_get_data_ptr(rocblas_handle handle, std::shared_ptr<void>& data_ptr)
+try
+{
+    if(!handle)
+        return rocblas_status_invalid_handle;
+    handle->get_data_ptr(data_ptr);
+    return rocblas_status_success;
+}
+catch(...)
+{
+    return exception_to_rocblas_status();
+}
 
 /*******************************************************************************
  * start device memory size queries

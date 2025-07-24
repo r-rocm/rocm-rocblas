@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2024 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2018-2025 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -29,10 +29,10 @@
 template <typename T, bool CONJ = false>
 void testing_dot_bad_arg(const Arguments& arg)
 {
-    auto rocblas_dot_fn    = arg.api == FORTRAN
+    auto rocblas_dot_fn    = arg.api & c_API_FORTRAN
                                  ? (CONJ ? rocblas_dotc<T, true> : rocblas_dot<T, true>)
                                  : (CONJ ? rocblas_dotc<T, false> : rocblas_dot<T, false>);
-    auto rocblas_dot_fn_64 = arg.api == FORTRAN_64
+    auto rocblas_dot_fn_64 = arg.api & c_API_FORTRAN
                                  ? (CONJ ? rocblas_dotc_64<T, true> : rocblas_dot_64<T, true>)
                                  : (CONJ ? rocblas_dotc_64<T, false> : rocblas_dot_64<T, false>);
 
@@ -46,14 +46,9 @@ void testing_dot_bad_arg(const Arguments& arg)
         int64_t incy = 1;
 
         // Allocate device memory
-        device_vector<T> dx(N, incx);
-        device_vector<T> dy(N, incy);
-        device_vector<T> d_rocblas_result(1, 1);
-
-        // Check device memory allocation
-        CHECK_DEVICE_ALLOCATION(dx.memcheck());
-        CHECK_DEVICE_ALLOCATION(dy.memcheck());
-        CHECK_DEVICE_ALLOCATION(d_rocblas_result.memcheck());
+        DEVICE_MEMCHECK(device_vector<T>, dx, (N, incx));
+        DEVICE_MEMCHECK(device_vector<T>, dy, (N, incy));
+        DEVICE_MEMCHECK(device_vector<T>, d_rocblas_result, (1, 1));
 
         // don't write to result so device pointer fine for both host and device mode
 
@@ -72,19 +67,13 @@ void testing_dot_bad_arg(const Arguments& arg)
     }
 }
 
-template <typename T>
-void testing_dotc_bad_arg(const Arguments& arg)
-{
-    testing_dot_bad_arg<T, true>(arg);
-}
-
 template <typename T, bool CONJ = false>
 void testing_dot(const Arguments& arg)
 {
-    auto rocblas_dot_fn    = arg.api == FORTRAN
+    auto rocblas_dot_fn    = arg.api & c_API_FORTRAN
                                  ? (CONJ ? rocblas_dotc<T, true> : rocblas_dot<T, true>)
                                  : (CONJ ? rocblas_dotc<T, false> : rocblas_dot<T, false>);
-    auto rocblas_dot_fn_64 = arg.api == FORTRAN_64
+    auto rocblas_dot_fn_64 = arg.api & c_API_FORTRAN
                                  ? (CONJ ? rocblas_dotc_64<T, true> : rocblas_dot_64<T, true>)
                                  : (CONJ ? rocblas_dotc_64<T, false> : rocblas_dot_64<T, false>);
 
@@ -105,11 +94,9 @@ void testing_dot(const Arguments& arg)
     // check to prevent undefined memmory allocation error
     if(N <= 0)
     {
-        device_vector<T> d_rocblas_result(1);
-        CHECK_DEVICE_ALLOCATION(d_rocblas_result.memcheck());
+        DEVICE_MEMCHECK(device_vector<T>, d_rocblas_result, (1));
 
-        host_vector<T> h_rocblas_result(1);
-        CHECK_HIP_ERROR(h_rocblas_result.memcheck());
+        HOST_MEMCHECK(host_vector<T>, h_rocblas_result, (1));
 
         CHECK_ROCBLAS_ERROR(rocblas_set_pointer_mode(handle, rocblas_pointer_mode_device));
         DAPI_CHECK(rocblas_dot_fn, (handle, N, nullptr, incx, nullptr, incy, d_rocblas_result));
@@ -129,18 +116,13 @@ void testing_dot(const Arguments& arg)
 
     // Naming: `h` is in CPU (host) memory(eg hx), `d` is in GPU (device) memory (eg dx).
     // Allocate host memory
-    host_vector<T> hx(N, incx);
-    host_vector<T> hy(N, incy);
+    HOST_MEMCHECK(host_vector<T>, hx, (N, incx));
+    HOST_MEMCHECK(host_vector<T>, hy, (N, incy));
 
     // Allocate device memory
-    device_vector<T> dx(N, incx, HMM);
-    device_vector<T> dy(N, incy, HMM);
-    device_vector<T> d_rocblas_result_device(1, 1, HMM);
-
-    // Check device memory allocation
-    CHECK_DEVICE_ALLOCATION(dx.memcheck());
-    CHECK_DEVICE_ALLOCATION(dy.memcheck());
-    CHECK_DEVICE_ALLOCATION(d_rocblas_result_device.memcheck());
+    DEVICE_MEMCHECK(device_vector<T>, dx, (N, incx, HMM));
+    DEVICE_MEMCHECK(device_vector<T>, dy, (N, incy, HMM));
+    DEVICE_MEMCHECK(device_vector<T>, d_rocblas_result_device, (1, 1, HMM));
 
     // Initialize data on host memory
     rocblas_init_vector(hx, arg, rocblas_client_alpha_sets_nan, true);
@@ -186,16 +168,51 @@ void testing_dot(const Arguments& arg)
                                               d_rocblas_result_device,
                                               sizeof(T),
                                               hipMemcpyDeviceToHost));
-                    for(int i = 0; i < arg.iters; i++)
+
+                    // multi-GPU support
+                    int device_id, device_count;
+                    CHECK_HIP_ERROR(limit_device_count(device_count, (int)arg.devices));
+
+                    for(int dev_id = 0; dev_id < device_count; dev_id++)
                     {
-                        DAPI_CHECK(rocblas_dot_fn,
-                                   (handle, N, dx, incx, dy_ptr, incy, d_rocblas_result_device));
-                        CHECK_HIP_ERROR(hipMemcpy(&rocblas_result_device_copy,
-                                                  d_rocblas_result_device,
-                                                  sizeof(T),
-                                                  hipMemcpyDeviceToHost));
-                        unit_check_general<T>(
-                            1, 1, 1, &rocblas_result_device, &rocblas_result_device_copy);
+                        CHECK_HIP_ERROR(hipGetDevice(&device_id));
+                        if(device_id != dev_id)
+                            CHECK_HIP_ERROR(hipSetDevice(dev_id));
+
+                        //New rocblas handle for new device
+                        rocblas_local_handle handle_copy{arg};
+
+                        //Allocate device memory in new device
+                        DEVICE_MEMCHECK(device_vector<T>, dx_copy, (N, incx, HMM));
+                        DEVICE_MEMCHECK(device_vector<T>, dy_copy, (N, incy, HMM));
+                        DEVICE_MEMCHECK(
+                            device_vector<T>, d_rocblas_result_device_copy, (1, 1, HMM));
+
+                        CHECK_HIP_ERROR(dx_copy.transfer_from(hx));
+                        CHECK_HIP_ERROR(dy_copy.transfer_from(hy));
+
+                        auto dy_ptr_copy = (arg.algo) ? (T*)(dx_copy) : (T*)(dy_copy);
+
+                        CHECK_ROCBLAS_ERROR(
+                            rocblas_set_pointer_mode(handle_copy, rocblas_pointer_mode_device));
+
+                        for(int runs = 0; runs < arg.iters; runs++)
+                        {
+                            DAPI_CHECK(rocblas_dot_fn,
+                                       (handle_copy,
+                                        N,
+                                        dx_copy,
+                                        incx,
+                                        dy_ptr_copy,
+                                        incy,
+                                        d_rocblas_result_device_copy));
+                            CHECK_HIP_ERROR(hipMemcpy(&rocblas_result_device_copy,
+                                                      d_rocblas_result_device_copy,
+                                                      sizeof(T),
+                                                      hipMemcpyDeviceToHost));
+                            unit_check_general<T>(
+                                1, 1, 1, &rocblas_result_device, &rocblas_result_device_copy);
+                        }
                     }
                     return;
                 }
@@ -310,10 +327,4 @@ void testing_dot(const Arguments& arg)
                                                                  rocblas_error_host,
                                                                  rocblas_error_device);
     }
-}
-
-template <typename T>
-void testing_dotc(const Arguments& arg)
-{
-    testing_dot<T, true>(arg);
 }

@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2024 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2018-2025 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -27,10 +27,11 @@
 template <typename T, typename U = T>
 void testing_rotg_batched_bad_arg(const Arguments& arg)
 {
-    auto rocblas_rotg_batched_fn
-        = arg.api == FORTRAN ? rocblas_rotg_batched<T, U, true> : rocblas_rotg_batched<T, U, false>;
-    auto rocblas_rotg_batched_fn_64 = arg.api == FORTRAN_64 ? rocblas_rotg_batched_64<T, U, true>
-                                                            : rocblas_rotg_batched_64<T, U, false>;
+    auto rocblas_rotg_batched_fn    = arg.api & c_API_FORTRAN ? rocblas_rotg_batched<T, U, true>
+                                                              : rocblas_rotg_batched<T, U, false>;
+    auto rocblas_rotg_batched_fn_64 = arg.api & c_API_FORTRAN
+                                          ? rocblas_rotg_batched_64<T, U, true>
+                                          : rocblas_rotg_batched_64<T, U, false>;
 
     int64_t             batch_count = 5;
     static const size_t safe_size   = 1;
@@ -78,10 +79,11 @@ void testing_rotg_batched_bad_arg(const Arguments& arg)
 template <typename T, typename U = T>
 void testing_rotg_batched(const Arguments& arg)
 {
-    auto rocblas_rotg_batched_fn
-        = arg.api == FORTRAN ? rocblas_rotg_batched<T, U, true> : rocblas_rotg_batched<T, U, false>;
-    auto rocblas_rotg_batched_fn_64 = arg.api == FORTRAN_64 ? rocblas_rotg_batched_64<T, U, true>
-                                                            : rocblas_rotg_batched_64<T, U, false>;
+    auto rocblas_rotg_batched_fn    = arg.api & c_API_FORTRAN ? rocblas_rotg_batched<T, U, true>
+                                                              : rocblas_rotg_batched<T, U, false>;
+    auto rocblas_rotg_batched_fn_64 = arg.api & c_API_FORTRAN
+                                          ? rocblas_rotg_batched_64<T, U, true>
+                                          : rocblas_rotg_batched_64<T, U, false>;
 
     int64_t batch_count = arg.batch_count;
 
@@ -223,27 +225,60 @@ void testing_rotg_batched(const Arguments& arg)
             host_batch_vector<T> rb_copy(1, 1, batch_count);
             host_batch_vector<U> rc_copy(1, 1, batch_count);
             host_batch_vector<T> rs_copy(1, 1, batch_count);
-            for(int i = 0; i < arg.iters; i++)
+
+            // multi-GPU support
+            int device_id, device_count;
+            CHECK_HIP_ERROR(limit_device_count(device_count, (int)arg.devices));
+
+            for(int dev_id = 0; dev_id < device_count; dev_id++)
             {
-                CHECK_HIP_ERROR(da.transfer_from(ha));
-                CHECK_HIP_ERROR(db.transfer_from(hb));
-                CHECK_HIP_ERROR(dc.transfer_from(hc));
-                CHECK_HIP_ERROR(ds.transfer_from(hs));
-                DAPI_CHECK(rocblas_rotg_batched_fn,
-                           (handle,
-                            da.ptr_on_device(),
-                            db.ptr_on_device(),
-                            dc.ptr_on_device(),
-                            ds.ptr_on_device(),
-                            batch_count));
-                CHECK_HIP_ERROR(ra_copy.transfer_from(da));
-                CHECK_HIP_ERROR(rb_copy.transfer_from(db));
-                CHECK_HIP_ERROR(rc_copy.transfer_from(dc));
-                CHECK_HIP_ERROR(rs_copy.transfer_from(ds));
-                unit_check_general<T>(1, 1, 1, ra, ra_copy, batch_count);
-                unit_check_general<T>(1, 1, 1, rb, rb_copy, batch_count);
-                unit_check_general<U>(1, 1, 1, rc, rc_copy, batch_count);
-                unit_check_general<T>(1, 1, 1, rs, rs_copy, batch_count);
+                CHECK_HIP_ERROR(hipGetDevice(&device_id));
+                if(device_id != dev_id)
+                    CHECK_HIP_ERROR(hipSetDevice(dev_id));
+
+                //New rocblas handle for new device
+                rocblas_local_handle handle_copy{arg};
+
+                // Allocate device memory
+                device_batch_vector<T> da_copy(1, 1, batch_count);
+                device_batch_vector<T> db_copy(1, 1, batch_count);
+                device_batch_vector<U> dc_copy(1, 1, batch_count);
+                device_batch_vector<T> ds_copy(1, 1, batch_count);
+
+                // Check device memory allocation
+                CHECK_DEVICE_ALLOCATION(da_copy.memcheck());
+                CHECK_DEVICE_ALLOCATION(db_copy.memcheck());
+                CHECK_DEVICE_ALLOCATION(dc_copy.memcheck());
+                CHECK_DEVICE_ALLOCATION(ds_copy.memcheck());
+
+                CHECK_ROCBLAS_ERROR(
+                    rocblas_set_pointer_mode(handle_copy, rocblas_pointer_mode_device));
+
+                for(int runs = 0; runs < arg.iters; runs++)
+                {
+                    CHECK_HIP_ERROR(da_copy.transfer_from(ha));
+                    CHECK_HIP_ERROR(db_copy.transfer_from(hb));
+                    CHECK_HIP_ERROR(dc_copy.transfer_from(hc));
+                    CHECK_HIP_ERROR(ds_copy.transfer_from(hs));
+
+                    DAPI_CHECK(rocblas_rotg_batched_fn,
+                               (handle_copy,
+                                da_copy.ptr_on_device(),
+                                db_copy.ptr_on_device(),
+                                dc_copy.ptr_on_device(),
+                                ds_copy.ptr_on_device(),
+                                batch_count));
+
+                    CHECK_HIP_ERROR(ra_copy.transfer_from(da_copy));
+                    CHECK_HIP_ERROR(rb_copy.transfer_from(db_copy));
+                    CHECK_HIP_ERROR(rc_copy.transfer_from(dc_copy));
+                    CHECK_HIP_ERROR(rs_copy.transfer_from(ds_copy));
+
+                    unit_check_general<T>(1, 1, 1, ra, ra_copy, batch_count);
+                    unit_check_general<T>(1, 1, 1, rb, rb_copy, batch_count);
+                    unit_check_general<U>(1, 1, 1, rc, rc_copy, batch_count);
+                    unit_check_general<T>(1, 1, 1, rs, rs_copy, batch_count);
+                }
             }
             return;
         }
