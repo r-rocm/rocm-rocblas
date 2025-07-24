@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2016-2023 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2016-2024 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -73,9 +73,8 @@ namespace
         if(!handle)
             return rocblas_status_invalid_handle;
 
-        size_t dev_bytes
-            = rocblas_reduction_kernel_workspace_size<API_INT, ROCBLAS_DOT_NB * WIN, T2>(
-                n, batch_count);
+        size_t dev_bytes = rocblas_reduction_workspace_size<API_INT, ROCBLAS_DOT_NB * WIN, T2>(
+            n, incx, incy, batch_count);
         if(handle->is_device_memory_size_query())
         {
             if(n <= 0 || batch_count <= 0)
@@ -84,35 +83,37 @@ namespace
                 return handle->set_optimal_device_memory_size(dev_bytes);
         }
 
-        auto layer_mode     = handle->layer_mode;
-        auto check_numerics = handle->check_numerics;
+        auto   layer_mode     = handle->layer_mode;
+        auto   check_numerics = handle->check_numerics;
+        Logger logger;
         if(layer_mode & rocblas_layer_mode_log_trace)
-            log_trace(handle, rocblas_dot_batched_name<CONJ, T>, n, x, incx, y, incy, batch_count);
+            logger.log_trace(
+                handle, rocblas_dot_batched_name<CONJ, T>, n, x, incx, y, incy, batch_count);
 
         if(layer_mode & rocblas_layer_mode_log_bench)
-            log_bench(handle,
-                      ROCBLAS_API_BENCH " -f dot_batched -r",
-                      rocblas_precision_string<T>,
-                      "-n",
-                      n,
-                      "--incx",
-                      incx,
-                      "--incy",
-                      incy,
-                      "--batch_count",
-                      batch_count);
+            logger.log_bench(handle,
+                             ROCBLAS_API_BENCH " -f dot_batched -r",
+                             rocblas_precision_string<T>,
+                             "-n",
+                             n,
+                             "--incx",
+                             incx,
+                             "--incy",
+                             incy,
+                             "--batch_count",
+                             batch_count);
 
         if(layer_mode & rocblas_layer_mode_log_profile)
-            log_profile(handle,
-                        rocblas_dot_batched_name<CONJ, T>,
-                        "N",
-                        n,
-                        "incx",
-                        incx,
-                        "incy",
-                        incy,
-                        "batch_count",
-                        batch_count);
+            logger.log_profile(handle,
+                               rocblas_dot_batched_name<CONJ, T>,
+                               "N",
+                               n,
+                               "incx",
+                               incx,
+                               "incy",
+                               incy,
+                               "batch_count",
+                               batch_count);
 
         // Quick return if possible.
         if(batch_count <= 0)

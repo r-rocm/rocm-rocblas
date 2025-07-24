@@ -1,5 +1,5 @@
 # ########################################################################
-# Copyright (C) 2016-2024 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (C) 2016-2025 Advanced Micro Devices, Inc. All rights reserved.
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -100,7 +100,7 @@ get_os_id(OS_ID)
 message (STATUS "OS detected is ${OS_ID}")
 
 # Versioning via rocm-cmake
-set ( VERSION_STRING "4.2.4" )
+set ( VERSION_STRING "4.4.1" )
 rocm_setup_version( VERSION ${VERSION_STRING} )
 
 # Users may override HIP path by specifying their own in CMAKE_MODULE_PATH
@@ -108,55 +108,94 @@ rocm_setup_version( VERSION ${VERSION_STRING} )
 list( APPEND CMAKE_PREFIX_PATH ${ROCM_PATH}/llvm ${ROCM_PATH} ${ROCM_PATH}/hip /opt/rocm/llvm /opt/rocm /opt/rocm/hip )
 
 # setting target list based on ROCm version
-set( TARGET_LIST_ROCM_5.6 "gfx803;gfx900;gfx906:xnack-;gfx908:xnack-;gfx90a:xnack+;gfx90a:xnack-;gfx1010;gfx1012;gfx1030;gfx1100;gfx1101;gfx1102")
-set( TARGET_LIST_ROCM_5.7 "gfx803;gfx900;gfx906:xnack-;gfx908:xnack-;gfx90a:xnack+;gfx90a:xnack-;gfx940;gfx941;gfx942;gfx1010;gfx1012;gfx1030;gfx1100;gfx1101;gfx1102")
-set( TARGET_LIST_ROCM_6.0 "gfx900;gfx906:xnack-;gfx908:xnack-;gfx90a:xnack+;gfx90a:xnack-;gfx940;gfx941;gfx942;gfx1010;gfx1012;gfx1030;gfx1100;gfx1101;gfx1102")
-set( TARGET_LIST_ROCM_6.2.4 "gfx900;gfx906:xnack-;gfx908:xnack-;gfx90a:xnack+;gfx90a:xnack-;gfx940;gfx941;gfx942;gfx1010;gfx1012;gfx1030;gfx1100;gfx1101;gfx1102;gfx1151")
+if (NOT BUILD_ADDRESS_SANITIZER)
+  set( TARGET_LIST_ROCM_5.6 "gfx803;gfx900;gfx906:xnack-;gfx908:xnack-;gfx90a:xnack+;gfx90a:xnack-;gfx1010;gfx1012;gfx1030;gfx1100;gfx1101;gfx1102")
+  set( TARGET_LIST_ROCM_5.7 "gfx803;gfx900;gfx906:xnack-;gfx908:xnack-;gfx90a:xnack+;gfx90a:xnack-;gfx940;gfx941;gfx942;gfx1010;gfx1012;gfx1030;gfx1100;gfx1101;gfx1102")
+  set( TARGET_LIST_ROCM_6.0 "gfx900;gfx906:xnack-;gfx908:xnack-;gfx90a:xnack+;gfx90a:xnack-;gfx940;gfx941;gfx942;gfx1010;gfx1012;gfx1030;gfx1100;gfx1101;gfx1102")
+  set( TARGET_LIST_ROCM_6.3 "gfx900;gfx906:xnack-;gfx908:xnack-;gfx90a;gfx942;gfx1010;gfx1012;gfx1030;gfx1100;gfx1101;gfx1102;gfx1151;gfx1200;gfx1201")
+else()
+  set( TARGET_LIST_ROCM_5.6 "gfx908:xnack+;gfx90a:xnack+")
+  set( TARGET_LIST_ROCM_5.7 "gfx908:xnack+;gfx90a:xnack+;gfx942:xnack+")
+  set( TARGET_LIST_ROCM_6.0 "gfx908:xnack+;gfx90a:xnack+;gfx942:xnack+")
+  set( TARGET_LIST_ROCM_6.3 "gfx908:xnack+;gfx90a:xnack+;gfx942:xnack+")
+endif()
 
 if(ROCM_PLATFORM_VERSION)
   if(${ROCM_PLATFORM_VERSION} VERSION_LESS 5.7.0)
     set(SUPPORTED_TARGETS "${TARGET_LIST_ROCM_5.6}")
   elseif(${ROCM_PLATFORM_VERSION} VERSION_LESS 6.0.0)
     set(SUPPORTED_TARGETS "${TARGET_LIST_ROCM_5.7}")
-  elseif(${ROCM_PLATFORM_VERSION} VERSION_LESS 6.2.4)
+  elseif(${ROCM_PLATFORM_VERSION} VERSION_LESS 6.3.0)
     set(SUPPORTED_TARGETS "${TARGET_LIST_ROCM_6.0}")
   else()
-    set(SUPPORTED_TARGETS "${TARGET_LIST_ROCM_6.2.4}")
+    set(SUPPORTED_TARGETS "${TARGET_LIST_ROCM_6.3}")
   endif()
+  message(STATUS "ROCM Platform Version: ${ROCM_PLATFORM_VERSION} default supported gfx list")
 else()
-  message(STATUS "ROCM Platform Version: ${ROCM_PLATFORM_VERSION} is not set, using default supported list")
-  set(SUPPORTED_TARGETS "${TARGET_LIST_ROCM_6.0}")
+  message(STATUS "ROCM Platform Version: ${ROCM_PLATFORM_VERSION} is not set, using latest supported gfx list")
+  set(SUPPORTED_TARGETS "${TARGET_LIST_ROCM_6.3}")
 endif()
 
-# gpu arch configuration
-set( AMDGPU_TARGETS "all" CACHE STRING "Compile for which gpu architectures?")
-set_property(CACHE AMDGPU_TARGETS PROPERTY STRINGS
+if( AMDGPU_TARGETS AND NOT GPU_TARGETS )
+  message( DEPRECATION "AMDGPU_TARGETS use is deprecated. Use GPU_TARGETS." )
+  set( GFX_LIST ${AMDGPU_TARGETS} )
+elseif( GPU_TARGETS )
+  set( GFX_LIST ${GPU_TARGETS} )
+else ()
+  set( GFX_LIST "all" ) # default if not set
+endif()
+
+# gpu arch configuration. GFX_LIST is ignored if already set by -DGPU_TARGETS
+set( GPU_TARGETS ${GFX_LIST} CACHE STRING "List of GPUs (gfx targets) to support")
+set_property(CACHE GPU_TARGETS PROPERTY STRINGS
   all
   ${SUPPORTED_TARGETS})
 
-# Detect if target ID syntax if supported for default all AMDGPU_TARGETS list
-# Sets the AMDGPU_TARGETS with backward compatibility
-if (AMDGPU_TARGETS STREQUAL "all")
+# Detect if target ID syntax if supported for default all GPU_TARGETS list
+# Sets the GPU_TARGETS with backward compatibility
+if (GPU_TARGETS STREQUAL "all")
   rocm_check_target_ids(target_list TARGETS "${SUPPORTED_TARGETS}")
 else()
-  rocm_check_target_ids(target_list TARGETS "${AMDGPU_TARGETS}")
+  rocm_check_target_ids(target_list TARGETS "${GPU_TARGETS}")
 endif()
 
 # if 'target_list' is empty, then compile does not support the gpu arch passed as an argument.
 if(target_list STREQUAL "")
-  message(FATAL_ERROR "Unsupported target ${AMDGPU_TARGETS} by compiler, List of supported targets:  ${SUPPORTED_TARGETS}")
+  message(FATAL_ERROR "Unsupported target ${GPU_TARGETS} by compiler, List of supported targets: ${SUPPORTED_TARGETS}")
 endif()
 
-# must FORCE set this AMDGPU_TARGETS before any find_package( hip ...), via tensile or in this file
-# to override CACHE var and set --offload-arch flags via hip-config.cmake hip::device dependency
-set( AMDGPU_TARGETS "${target_list}" CACHE STRING "AMD GPU targets to compile for" FORCE )
+# set GPU_TARGETS and AMDGPU_TARGETS before any find_package( hip ...), via tensile or in this file
+# to set --offload-arch flags via hip-config.cmake hip::device dependency
+set( GPU_TARGETS "${target_list}" CACHE STRING "List of GPUs (gfx targets) to support" FORCE )
+set( AMDGPU_TARGETS "${GPU_TARGETS}" CACHE STRING "List of GPUs (gfx targets) to support" FORCE ) # for old hip cmake files backward compatibility
 
+option( BUILD_WITH_HIPBLASLT "Build with HipBLASLt" ON )
+set( hipblaslt_path "/opt/rocm" CACHE PATH "Use local HipBLASLt directory" )
+set( HIPBLASLT_VERSION 0.10 CACHE STRING "The version of HipBLASLt to be used" )
+
+if( WIN32 OR NOT BUILD_WITH_TENSILE OR NOT BUILD_SHARED_LIBS )
+  set( BUILD_WITH_HIPBLASLT OFF )
+endif()
+
+function(list_replace list old new)
+  foreach( i ${${list}} )
+    if( i STREQUAL ${old} )
+      list( APPEND new_list ${new} )
+    else( )
+      list( APPEND new_list ${i} )
+    endif( )
+    set( ${list} ${new_list} PARENT_SCOPE )
+  endforeach( )
+endfunction( )
 
 if(NOT SKIP_LIBRARY)
   if( BUILD_WITH_TENSILE )
     # we will have expanded "all" for tensile to ensure consistency as we have local rules
-    set( Tensile_ARCHITECTURE "${AMDGPU_TARGETS}" CACHE STRING "Tensile to use which architecture?" FORCE)
-    set( TENSILE_VERSION 4.41.0 CACHE STRING "The version of Tensile to be used")
+    set( Tensile_ARCHITECTURE "${GPU_TARGETS}" CACHE STRING "Tensile to use which architecture?" FORCE)
+
+    list_replace( Tensile_ARCHITECTURE "gfx90a" "gfx90a:xnack+\;gfx90a:xnack-")
+
+    set( TENSILE_VERSION 4.43.0 CACHE STRING "The version of Tensile to be used")
 
     if(BUILD_WITH_PIP)
       if (WIN32)
@@ -171,7 +210,7 @@ if(NOT SKIP_LIBRARY)
         virtualenv_install(${Tensile_TEST_LOCAL_PATH})
         message (STATUS "using local Tensile from ${Tensile_TEST_LOCAL_PATH}, copied to ${Tensile_ROOT}")
       else()
-        # Use the virtual-env setup and download package from specified repot:
+        # Use the virtual-env setup and download package from specified repo:
         set( tensile_fork "ROCmSoftwarePlatform" CACHE STRING "Tensile fork to use" )
         file (STRINGS "tensile_tag.txt" read_tensile_tag)
         set( tensile_tag ${read_tensile_tag} CACHE STRING "Tensile tag to download" )
@@ -185,7 +224,7 @@ if(NOT SKIP_LIBRARY)
   endif()
 endif()
 
-message(STATUS "Using AMDGPU_TARGETS: ${AMDGPU_TARGETS}")
+message(STATUS "Using GPU_TARGETS: ${GPU_TARGETS}")
 
 # Find HIP dependencies
 if( CMAKE_CXX_COMPILER_ID MATCHES "Clang" )
@@ -208,6 +247,11 @@ if( BUILD_WITH_TENSILE )
   endif()
 endif()
 
+if( BUILD_WITH_HIPBLASLT )
+  list( APPEND HIPBLASLT_DEFINES BUILD_WITH_HIPBLASLT )
+  rocm_package_add_dependencies(DEPENDS "hipblaslt >= ${HIPBLASLT_VERSION}")
+endif()
+
 if( BUILD_CLIENTS_SAMPLES OR BUILD_CLIENTS_TESTS OR BUILD_CLIENTS_BENCHMARKS )
   if(NOT CLIENTS_OS)
     rocm_set_os_id(CLIENTS_OS)
@@ -227,7 +271,7 @@ if( BUILD_CLIENTS_SAMPLES OR BUILD_CLIENTS_TESTS OR BUILD_CLIENTS_BENCHMARKS )
     set(GFORTRAN_DEB "libgfortran5")
   elseif(CLIENTS_OS STREQUAL "sles")
     set(OPENMP_RPM "libgomp1")
-  elseif(CLIENTS_OS STREQUAL "mariner")
+  elseif(CLIENTS_OS STREQUAL "mariner" OR CLIENTS_OS STREQUAL "azurelinux")
     set(GFORTRAN_RPM "gfortran")
   endif()
 
@@ -319,6 +363,9 @@ else()
 endif( )
 
 set( CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION "\${CPACK_PACKAGING_INSTALL_PREFIX}" )
+
+# work around code object stripping failure if using /usr/bin/strip
+set( CPACK_RPM_SPEC_MORE_DEFINE "%define __strip ${rocm_bin}/../llvm/bin/llvm-strip")
 
 # Give rocblas compiled for CUDA backend a different name
 if( CMAKE_CXX_COMPILER_ID MATCHES "Clang" )

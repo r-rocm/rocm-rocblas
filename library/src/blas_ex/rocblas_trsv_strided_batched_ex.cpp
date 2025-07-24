@@ -20,11 +20,8 @@
  *
  * ************************************************************************ */
 #include "handle.hpp"
-#include "rocblas.h"
-
-#ifdef BUILD_WITH_TENSILE
-
 #include "logging.hpp"
+#include "rocblas.h"
 #include "rocblas_block_sizes.h"
 #include "rocblas_trsv_inverse.hpp"
 #include "utility.hpp"
@@ -51,23 +48,25 @@ namespace
         if(!handle)
             return rocblas_status_invalid_handle;
 
+        Logger logger;
+
         if(!handle->is_device_memory_size_query())
         {
             auto layer_mode = handle->layer_mode;
             if(layer_mode & rocblas_layer_mode_log_trace)
-                log_trace(handle,
-                          "rocblas_trsv_strided_batched_ex",
-                          uplo,
-                          transA,
-                          diag,
-                          m,
-                          A,
-                          lda,
-                          stride_A,
-                          B,
-                          incx,
-                          stride_x,
-                          batch_count);
+                logger.log_trace(handle,
+                                 "rocblas_trsv_strided_batched_ex",
+                                 uplo,
+                                 transA,
+                                 diag,
+                                 m,
+                                 A,
+                                 lda,
+                                 stride_A,
+                                 B,
+                                 incx,
+                                 stride_x,
+                                 batch_count);
 
             if(layer_mode & (rocblas_layer_mode_log_bench | rocblas_layer_mode_log_profile))
             {
@@ -78,50 +77,50 @@ namespace
                 if(layer_mode & rocblas_layer_mode_log_bench)
                 {
                     if(handle->pointer_mode == rocblas_pointer_mode_host)
-                        log_bench(handle,
-                                  "./rocblas-bench -f trsv_strided_batched_ex -r",
-                                  rocblas_precision_string<T>,
-                                  "--uplo",
-                                  uplo_letter,
-                                  "--transposeA",
-                                  transA_letter,
-                                  "--diag",
-                                  diag_letter,
-                                  "-m",
-                                  m,
-                                  "--lda",
-                                  lda,
-                                  "--stride_a",
-                                  stride_A,
-                                  "--incx",
-                                  incx,
-                                  "--stride_x",
-                                  stride_x,
-                                  "--batch_count",
-                                  batch_count);
+                        logger.log_bench(handle,
+                                         "./rocblas-bench -f trsv_strided_batched_ex -r",
+                                         rocblas_precision_string<T>,
+                                         "--uplo",
+                                         uplo_letter,
+                                         "--transposeA",
+                                         transA_letter,
+                                         "--diag",
+                                         diag_letter,
+                                         "-m",
+                                         m,
+                                         "--lda",
+                                         lda,
+                                         "--stride_a",
+                                         stride_A,
+                                         "--incx",
+                                         incx,
+                                         "--stride_x",
+                                         stride_x,
+                                         "--batch_count",
+                                         batch_count);
                 }
 
                 if(layer_mode & rocblas_layer_mode_log_profile)
-                    log_profile(handle,
-                                "rocblas_trsv_strided_batched_ex",
-                                "uplo",
-                                uplo_letter,
-                                "transA",
-                                transA_letter,
-                                "diag",
-                                diag_letter,
-                                "M",
-                                m,
-                                "lda",
-                                lda,
-                                "stride_a",
-                                stride_A,
-                                "incx",
-                                incx,
-                                "stride_x",
-                                stride_x,
-                                "batch_count",
-                                batch_count);
+                    logger.log_profile(handle,
+                                       "rocblas_trsv_strided_batched_ex",
+                                       "uplo",
+                                       uplo_letter,
+                                       "transA",
+                                       transA_letter,
+                                       "diag",
+                                       diag_letter,
+                                       "M",
+                                       m,
+                                       "lda",
+                                       lda,
+                                       "stride_a",
+                                       stride_A,
+                                       "incx",
+                                       incx,
+                                       "stride_x",
+                                       stride_x,
+                                       "batch_count",
+                                       batch_count);
             }
         }
 
@@ -242,8 +241,6 @@ namespace
 
 } // namespace
 
-#endif // BUILD_WITH_TENSILE
-
 /*
  * ===========================================================================
  *    C wrapper
@@ -269,7 +266,6 @@ rocblas_status rocblas_trsv_strided_batched_ex(rocblas_handle    handle,
                                                rocblas_datatype  compute_type)
 try
 {
-#ifdef BUILD_WITH_TENSILE
     switch(compute_type)
     {
     case rocblas_datatype_f64_r:
@@ -343,9 +339,6 @@ try
     default:
         return rocblas_status_not_implemented;
     }
-#else
-    return rocblas_status_excluded_from_build;
-#endif
 }
 catch(...)
 {

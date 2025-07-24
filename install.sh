@@ -126,17 +126,17 @@ install_packages( )
                                       "gcc-c++" )
   local library_dependencies_rhel_8=( "epel-release"
                                       "make" "rpm-build"
-                                      "python36" "python3*-PyYAML" "python3-virtualenv" "python3-joblib"
+                                      "python36" "python3*-PyYAML" "python3-virtualenv"
                                       "gcc-c++" )
   local library_dependencies_rhel_9=( "epel-release" "openssl-devel"
                                       "make" "rpm-build"
-                                      "python39" "python3*-PyYAML" "python3-virtualenv" "python3-joblib"
+                                      "python39" "python3*-PyYAML" "python3-virtualenv"
                                       "gcc-c++" )
   local library_dependencies_fedora=( "make" "rpm-build"
                                       "python34" "python3*-PyYAML" "python3-virtualenv" "python3-joblib"
                                       "gcc-c++" "libcxx-devel" )
   local library_dependencies_sles=(   "make" "python3-PyYAML" "python3-virtualenv" "python3-joblib"
-                                      "gcc-c++" "libcxxtools9" "rpm-build" )
+                                      "gcc-c++" "rpm-build" )
 
   if [[ "${tensile_msgpack_backend}" == true ]]; then
     library_dependencies_ubuntu+=("libmsgpack-dev")
@@ -221,8 +221,14 @@ install_packages( )
       ;;
 
     sles|opensuse-leap)
-       install_zypper_packages "${library_dependencies_sles[@]}"
-        ;;
+      if (( "${VERSION_ID%%.*}" >= "15" )); then
+        library_dependencies_sles+=( "libcxxtools10" )
+      else
+        library_dependencies_sles+=( "libcxxtools9" )
+      fi
+      install_zypper_packages "${library_dependencies_sles[@]}"
+      ;;
+
     *)
       echo "This script is currently supported on Ubuntu, CentOS, RHEL, SLES, OpenSUSE-Leap, and Fedora"
       exit 2
@@ -442,15 +448,15 @@ install_blis()
 
 # Default cmake executable is called cmake
 cmake_executable=cmake
-cxx="hipcc"
-cc="hipcc"
+cxx="g++"
+cc="gcc"
 fc="gfortran"
 
 # #################################################
 # dependencies
 # #################################################
 if [[ "${install_dependencies}" == true ]]; then
-  CMAKE_VERSION=$(cmake --version | grep -oP '(?<=version )[^ ]*' )
+  CMAKE_VERSION=$(${cmake_executable} --version | grep -oP '(?<=version )[^ ]*')
 
   install_packages
 

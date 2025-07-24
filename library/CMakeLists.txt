@@ -1,5 +1,5 @@
 # ########################################################################
-# Copyright (C) 2016-2023 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (C) 2016-2024 Advanced Micro Devices, Inc. All rights reserved.
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -60,9 +60,6 @@ function( rocblas_library_settings lib_target_ )
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
   )
 
-  # GCC or hip-clang needs specific flags to turn on f16c intrinsics
-  target_compile_options( ${lib_target_} PRIVATE -mf16c )
-
   # Do not allow Variable Length Arrays (use unique_ptr instead)
   target_compile_options( ${lib_target_} PRIVATE -Werror=vla )
 
@@ -74,14 +71,20 @@ function( rocblas_library_settings lib_target_ )
   set_target_properties( ${lib_target_} PROPERTIES CXX_EXTENSIONS NO )
   set_target_properties( ${lib_target_} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/staging" )
 
+  if(BUILD_OFFLOAD_COMPRESS AND CXX_COMPILER_SUPPORTS_OFFLOAD_COMPRESS)
+    set_target_properties( ${lib_target_} PROPERTIES COMPILE_FLAGS "--offload-compress" )
+  endif()
+
   target_link_libraries( ${lib_target_} INTERFACE hip::host )
   if (WIN32)
     target_link_libraries( ${lib_target_} PRIVATE hip::device )
   else()
-    target_link_libraries( ${lib_target_} PRIVATE hip::device -lstdc++fs --rtlib=compiler-rt --unwindlib=libgcc )
+    target_link_libraries( ${lib_target_} PRIVATE hip::device -lstdc++fs --rtlib=compiler-rt --unwindlib=libgcc)
+    if (BUILD_SHARED_LIBS)
+      target_link_libraries(${lib_target_} PRIVATE -lroctx64)
+    endif()
   endif()
     target_link_libraries( ${lib_target_} PRIVATE Threads::Threads )
-
   #  -fno-gpu-rdc compiler option was used with hcc, so revisit feature at some point
 
   set_target_properties( ${lib_target_} PROPERTIES CXX_VISIBILITY_PRESET "hidden" C_VISIBILITY_PRESET "hidden" VISIBILITY_INLINES_HIDDEN ON )
@@ -104,7 +107,7 @@ set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
 # This is incremented when the ABI to the library changes
-set( rocblas_SOVERSION 4.2 )
+set( rocblas_SOVERSION 4.4 )
 
 list( APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake )
 
@@ -268,6 +271,8 @@ else()
   endif()
 endif()
 
-
-
-
+if(BUILD_WITH_HIPBLASLT)
+  rocm_package_add_dependencies(SHARED_DEPENDS "hipblaslt >= ${HIPBLASLT_VERSION}")
+  rocm_package_add_rpm_dependencies(STATIC_DEPENDS "hipblaslt >= ${HIPBLASLT_VERSION}")
+  rocm_package_add_deb_dependencies(STATIC_DEPENDS "hipblaslt >= ${HIPBLASLT_VERSION}")
+endif()

@@ -24,6 +24,7 @@
 
 #include "../blas2/rocblas_trsv.hpp"
 #include "definitions.hpp"
+#include "device_macros.hpp"
 #ifdef BUILD_WITH_TENSILE
 #include "../blas_ex/rocblas_gemm_ex.hpp"
 #endif
@@ -31,6 +32,7 @@
 #include "rocblas_block_sizes.h"
 #include "rocblas_gemm.hpp"
 #include "rocblas_trsm.hpp"
+#include "src64/blas3/rocblas_gemm_64.hpp"
 #include "trtri_trsm.hpp"
 
 /** Constants for block size of trsm **/
@@ -139,51 +141,71 @@ static const T alpha_1 = T(1);
 template <typename T>
 static const T beta_1 = T(1);
 
-template <rocblas_int DIM_X, rocblas_int DIM_Y, typename T, typename U, typename V>
+template <int DIM_X, int DIM_Y, typename T, typename U, typename V>
 ROCBLAS_KERNEL(DIM_X* DIM_Y)
-copy_matrix_trsm(rocblas_int    rows,
-                 rocblas_int    cols,
-                 rocblas_int    elem_size,
-                 U              a,
-                 rocblas_int    lda,
-                 rocblas_stride stride_a,
-                 V              b,
-                 rocblas_int    ldb,
-                 rocblas_stride stride_b,
-                 rocblas_stride offset_a,
-                 rocblas_stride offset_b)
+rocblas_copy_matrix_trsm(rocblas_int    rows,
+                         rocblas_int    cols,
+                         rocblas_int    elem_size,
+                         U              a,
+                         rocblas_int    lda,
+                         rocblas_stride stride_a,
+                         V              b,
+                         rocblas_int    ldb,
+                         rocblas_stride stride_b,
+                         rocblas_stride offset_a,
+                         rocblas_stride offset_b,
+                         rocblas_int    batch_count)
 {
-    const T* xa = load_ptr_batch(a, blockIdx.z, offset_a, stride_a);
-    T*       xb = load_ptr_batch(b, blockIdx.z, offset_b, stride_b);
+    size_t tx = blockIdx.x * DIM_X + threadIdx.x;
 
-    size_t tx = blockIdx.x * blockDim.x + threadIdx.x;
-    size_t ty = blockIdx.y * blockDim.y + threadIdx.y;
+    uint32_t batch = blockIdx.z;
 
-    if(tx < rows && ty < cols)
-        xb[tx + size_t(ldb) * ty] = xa[tx + size_t(lda) * ty];
+#if DEVICE_GRID_YZ_16BIT
+    for(; batch < batch_count; batch += c_YZ_grid_launch_limit)
+    {
+#endif
+
+        const T* xa = load_ptr_batch(a, batch, offset_a, stride_a);
+        T*       xb = load_ptr_batch(b, batch, offset_b, stride_b);
+
+        //looping over ty
+        for(size_t ty = blockIdx.y * DIM_Y + threadIdx.y; ty < cols && tx < rows;
+            ty += DIM_Y * gridDim.y)
+            xb[tx + size_t(ldb) * ty] = xa[tx + size_t(lda) * ty];
+
+#if DEVICE_GRID_YZ_16BIT
+    }
+#endif
 }
 
 /* ===============copy helper============================================= */
 template <typename T, typename U, typename V>
-rocblas_status copy_block_unit(rocblas_handle handle,
-                               rocblas_int    m,
-                               rocblas_int    n,
-                               U              src,
-                               rocblas_int    src_ld,
-                               rocblas_stride src_stride,
-                               V              dst,
-                               rocblas_int    dst_ld,
-                               rocblas_stride dst_stride,
-                               rocblas_int    batch_count,
-                               rocblas_stride offset_src = 0,
-                               rocblas_stride offset_dst = 0)
+rocblas_status rocblas_copy_block_unit(rocblas_handle handle,
+                                       rocblas_int    m,
+                                       rocblas_int    n,
+                                       U              src,
+                                       rocblas_int    src_ld,
+                                       rocblas_stride src_stride,
+                                       V              dst,
+                                       rocblas_int    dst_ld,
+                                       rocblas_stride dst_stride,
+                                       rocblas_int    batch_count,
+                                       rocblas_stride offset_src = 0,
+                                       rocblas_stride offset_dst = 0)
 {
-    rocblas_int blocksX = (m - 1) / 128 + 1; // parameters for device kernel
-    rocblas_int blocksY = (n - 1) / 8 + 1;
-    dim3        grid(blocksX, blocksY, batch_count);
-    dim3        threads(128, 8);
+    static constexpr int COPY_DIM_X = 128;
+    static constexpr int COPY_DIM_Y = 8;
 
-    ROCBLAS_LAUNCH_KERNEL((copy_matrix_trsm<128, 8, T>),
+    int batches = handle->getBatchGridDim((int)batch_count);
+
+    rocblas_int blocks_X = (m - 1) / COPY_DIM_X + 1; // parameters for device kernel
+
+    //blocksY should be less than 2^16 (65536) to avoid overflow as grid y and z dimensions support only 16-bit values on some gfx
+    rocblas_int blocks_Y = std::min(c_YZ_grid_launch_limit, (n - 1) / COPY_DIM_Y + 1);
+    dim3        grid(blocks_X, blocks_Y, batches);
+    dim3        threads(COPY_DIM_X, COPY_DIM_Y);
+
+    ROCBLAS_LAUNCH_KERNEL((rocblas_copy_matrix_trsm<COPY_DIM_X, COPY_DIM_Y, T>),
                           grid,
                           threads,
                           0,
@@ -198,29 +220,42 @@ rocblas_status copy_block_unit(rocblas_handle handle,
                           dst_ld,
                           dst_stride,
                           offset_src,
-                          offset_dst);
+                          offset_dst,
+                          batch_count);
 
     return rocblas_status_success;
 }
 
 template <rocblas_int DIM_X, rocblas_int DIM_Y, typename T, typename U>
 ROCBLAS_KERNEL(DIM_X* DIM_Y)
-set_matrix_trsm(int64_t        rows,
-                int64_t        cols,
-                rocblas_int    elem_size,
-                U              a,
-                int64_t        lda,
-                rocblas_stride stride_a,
-                T              val,
-                rocblas_stride offset_a)
+rocblas_set_matrix_trsm(int64_t        rows,
+                        int64_t        cols,
+                        rocblas_int    elem_size,
+                        U              a,
+                        int64_t        lda,
+                        rocblas_stride stride_a,
+                        T              val,
+                        rocblas_stride offset_a,
+                        int            batch_count)
 {
-    T* xa = load_ptr_batch(a, blockIdx.z, offset_a, stride_a);
+    size_t tx = blockIdx.x * DIM_X + threadIdx.x;
+    size_t ty = blockIdx.y * DIM_Y + threadIdx.y;
 
-    size_t tx = blockIdx.x * blockDim.x + threadIdx.x;
-    size_t ty = blockIdx.y * blockDim.y + threadIdx.y;
+    uint32_t batch = blockIdx.z;
 
-    if(tx < rows && ty < cols)
-        xa[tx + lda * ty] = T(0.0);
+#if DEVICE_GRID_YZ_16BIT
+    for(; batch < batch_count; batch += c_YZ_grid_launch_limit)
+    {
+#endif
+
+        T* xa = load_ptr_batch(a, batch, offset_a, stride_a);
+
+        if(tx < rows && ty < cols)
+            xa[tx + lda * ty] = T(0.0);
+
+#if DEVICE_GRID_YZ_16BIT
+    }
+#endif
 }
 
 /* ===============set helper============================================= */
@@ -235,12 +270,16 @@ rocblas_status set_block_unit(rocblas_handle handle,
                               T              val,
                               rocblas_stride offset_src)
 {
-    rocblas_int blocksX = (m - 1) / 128 + 1; // parameters for device kernel
-    rocblas_int blocksY = (n - 1) / 8 + 1;
-    dim3        grid(blocksX, blocksY, batch_count);
-    dim3        threads(128, 8);
+    static constexpr int DIM_X = 128;
+    static constexpr int DIM_Y = 8;
 
-    ROCBLAS_LAUNCH_KERNEL((set_matrix_trsm<128, 8, T>),
+    int         batches = handle->getBatchGridDim((int)batch_count);
+    rocblas_int blocksX = (m - 1) / DIM_X + 1; // parameters for device kernel
+    rocblas_int blocksY = (n - 1) / DIM_Y + 1;
+    dim3        grid(blocksX, blocksY, batches);
+    dim3        threads(DIM_X, DIM_Y);
+
+    ROCBLAS_LAUNCH_KERNEL((rocblas_set_matrix_trsm<DIM_X, DIM_Y, T>),
                           grid,
                           threads,
                           0,
@@ -252,7 +291,8 @@ rocblas_status set_block_unit(rocblas_handle handle,
                           src_ld,
                           src_stride,
                           val,
-                          offset_src);
+                          offset_src,
+                          batch_count);
 
     return rocblas_status_success;
 }
@@ -292,103 +332,102 @@ rocblas_status rocblas_trsm_left(rocblas_handle    handle,
         {
             // left, lower no-transpose
             jb = std::min(BLOCK, m);
-            rocblas_internal_gemm_template<BATCHED>(handle,
-                                                    transA,
-                                                    transB,
-                                                    jb,
-                                                    n,
-                                                    jb,
-                                                    alpha,
-                                                    invA,
-                                                    offset_invAin,
-                                                    BLOCK,
-                                                    stride_invA,
-                                                    (U)B,
-                                                    offset_Bin,
-                                                    ldb,
-                                                    stride_B,
-                                                    &beta_0<T>,
-                                                    X,
-                                                    rocblas_int(0),
-                                                    m,
-                                                    stride_X,
-                                                    batch_count);
+            rocblas_internal_gemm<BATCHED>(handle,
+                                           transA,
+                                           transB,
+                                           jb,
+                                           n,
+                                           jb,
+                                           alpha,
+                                           invA,
+                                           offset_invAin,
+                                           BLOCK,
+                                           stride_invA,
+                                           (U)B,
+                                           offset_Bin,
+                                           ldb,
+                                           stride_B,
+                                           &beta_0<T>,
+                                           X,
+                                           rocblas_int(0),
+                                           m,
+                                           stride_X,
+                                           batch_count);
 
             if(BLOCK < m)
             {
-                rocblas_internal_gemm_template<BATCHED>(handle,
-                                                        transA,
-                                                        transB,
-                                                        m - BLOCK,
-                                                        n,
-                                                        BLOCK,
-                                                        &alpha_negative_one<T>,
-                                                        A,
-                                                        BLOCK + offset_Ain,
-                                                        lda,
-                                                        stride_A,
-                                                        (U)X,
-                                                        rocblas_int(0),
-                                                        m,
-                                                        stride_X,
-                                                        alpha,
-                                                        B,
-                                                        BLOCK + offset_Bin,
-                                                        ldb,
-                                                        stride_B,
-                                                        batch_count);
+                rocblas_internal_gemm<BATCHED>(handle,
+                                               transA,
+                                               transB,
+                                               m - BLOCK,
+                                               n,
+                                               BLOCK,
+                                               &alpha_negative_one<T>,
+                                               A,
+                                               BLOCK + offset_Ain,
+                                               lda,
+                                               stride_A,
+                                               (U)X,
+                                               rocblas_int(0),
+                                               m,
+                                               stride_X,
+                                               alpha,
+                                               B,
+                                               BLOCK + offset_Bin,
+                                               ldb,
+                                               stride_B,
+                                               batch_count);
                 // remaining blocks
                 for(i = BLOCK; i < m; i += BLOCK)
                 {
                     jb = std::min(m - i, BLOCK);
 
-                    rocblas_internal_gemm_template<BATCHED>(handle,
-                                                            transA,
-                                                            transB,
-                                                            jb,
-                                                            n,
-                                                            jb,
-                                                            &alpha_1<T>,
-                                                            invA,
-                                                            i * size_t(BLOCK) + offset_invAin,
-                                                            BLOCK,
-                                                            stride_invA,
-                                                            (U)B,
-                                                            i + offset_Bin,
-                                                            ldb,
-                                                            stride_B,
-                                                            &beta_0<T>,
-                                                            X,
-                                                            i,
-                                                            m,
-                                                            stride_X,
-                                                            batch_count);
+                    rocblas_internal_gemm<BATCHED>(handle,
+                                                   transA,
+                                                   transB,
+                                                   jb,
+                                                   n,
+                                                   jb,
+                                                   &alpha_1<T>,
+                                                   invA,
+                                                   i * size_t(BLOCK) + offset_invAin,
+                                                   BLOCK,
+                                                   stride_invA,
+                                                   (U)B,
+                                                   i + offset_Bin,
+                                                   ldb,
+                                                   stride_B,
+                                                   &beta_0<T>,
+                                                   X,
+                                                   i,
+                                                   m,
+                                                   stride_X,
+                                                   batch_count);
                     if(i + BLOCK >= m) // this condition is not necessary at all and can be changed
                         // as if (i+BLOCK<m)
                         break;
 
-                    rocblas_internal_gemm_template<BATCHED>(handle,
-                                                            transA,
-                                                            transB,
-                                                            m - i - BLOCK,
-                                                            n,
-                                                            BLOCK,
-                                                            &alpha_negative_one<T>,
-                                                            A,
-                                                            i + BLOCK + i * size_t(lda)
-                                                                + offset_Ain,
-                                                            lda,
-                                                            stride_A,
-                                                            (U)X,
-                                                            i,
-                                                            m,
-                                                            stride_X,
-                                                            &beta_1<T>,
-                                                            B,
-                                                            i + BLOCK + offset_Bin,
-                                                            ldb,
-                                                            stride_B,
-                                                            batch_count);
+                    rocblas_internal_gemm<BATCHED>(handle,
+                                                   transA,
+                                                   transB,
+                                                   m - i - BLOCK,
+                                                   n,
+                                                   BLOCK,
+                                                   &alpha_negative_one<T>,
+                                                   A,
+                                                   i + BLOCK + i * size_t(lda) + offset_Ain,
+                                                   lda,
+                                                   stride_A,
+                                                   (U)X,
+                                                   i,
+                                                   m,
+                                                   stride_X,
+                                                   &beta_1<T>,
+                                                   B,
+                                                   i + BLOCK + offset_Bin,
+                                                   ldb,
+                                                   stride_B,
+                                                   batch_count);
                 }
             }
 
@@ -396,9 +435,9 @@ rocblas_status rocblas_trsm_left(rocblas_handle    handle,
             for( i=0; i < m; i += BLOCK ) {
                 jb = std::min(m-i, BLOCK);
                 T *tmp = (i == 0) ? alpha : one;
-                rocblas_internal_gemm_template<false>(handle, transA, transB, jb, n, jb, tmp, invA(i), BLOCK, stride_invA, B(i,0), ldb, stride_B, &beta_0<T>, X(i,0), ldb, stride_X, batch_count); // strides?
+                rocblas_internal_gemm<false>(handle, transA, transB, jb, n, jb, tmp, invA(i), BLOCK, stride_invA, B(i,0), ldb, stride_B, &beta_0<T>, X(i,0), ldb, stride_X, batch_count); // strides?
                 if(i + BLOCK < m){
-                    rocblas_internal_gemm_template<false>(handle, transA, transB, m-i-BLOCK, n, BLOCK, &alpha_negative_one<T>, A(i+BLOCK,i), lda, stride_A, X(i,0), ldb, stride_X, tmp, B(i+BLOCK,0), ldb, stride_B, batch_count); // strides?
+                    rocblas_internal_gemm<false>(handle, transA, transB, m-i-BLOCK, n, BLOCK, &alpha_negative_one<T>, A(i+BLOCK,i), lda, stride_A, X(i,0), ldb, stride_X, tmp, B(i+BLOCK,0), ldb, stride_B, batch_count); // strides?
                 }
             }
 
@@ -411,100 +450,100 @@ rocblas_status rocblas_trsm_left(rocblas_handle    handle,
             i  = m - jb;
 
             // if m=n=35=lda=ldb, BLOCK =32, then jb = 3, i = 32; {3, 35, 3, 32, 35, 35}
-            rocblas_internal_gemm_template<BATCHED>(handle,
-                                                    transA,
-                                                    transB,
-                                                    jb,
-                                                    n,
-                                                    jb,
-                                                    alpha,
-                                                    invA,
-                                                    i * size_t(BLOCK) + offset_invAin,
-                                                    BLOCK,
-                                                    stride_invA,
-                                                    (U)B,
-                                                    i + offset_Bin,
-                                                    ldb,
-                                                    stride_B,
-                                                    &beta_0<T>,
-                                                    X,
-                                                    i,
-                                                    m,
-                                                    stride_X,
-                                                    batch_count);
+            rocblas_internal_gemm<BATCHED>(handle,
+                                           transA,
+                                           transB,
+                                           jb,
+                                           n,
+                                           jb,
+                                           alpha,
+                                           invA,
+                                           i * size_t(BLOCK) + offset_invAin,
+                                           BLOCK,
+                                           stride_invA,
+                                           (U)B,
+                                           i + offset_Bin,
+                                           ldb,
+                                           stride_B,
+                                           &beta_0<T>,
+                                           X,
+                                           i,
+                                           m,
+                                           stride_X,
+                                           batch_count);
 
             if(i - BLOCK >= 0)
             {
-                rocblas_internal_gemm_template<BATCHED>(handle,
-                                                        transA,
-                                                        transB,
-                                                        i,
-                                                        n,
-                                                        jb,
-                                                        &alpha_negative_one<T>,
-                                                        A,
-                                                        i * size_t(lda) + offset_Ain,
-                                                        lda,
-                                                        stride_A,
-                                                        (U)X,
-                                                        i,
-                                                        m,
-                                                        stride_X,
-                                                        alpha,
-                                                        B,
-                                                        offset_Bin,
-                                                        ldb,
-                                                        stride_B,
-                                                        batch_count);
+                rocblas_internal_gemm<BATCHED>(handle,
+                                               transA,
+                                               transB,
+                                               i,
+                                               n,
+                                               jb,
+                                               &alpha_negative_one<T>,
+                                               A,
+                                               i * size_t(lda) + offset_Ain,
+                                               lda,
+                                               stride_A,
+                                               (U)X,
+                                               i,
+                                               m,
+                                               stride_X,
+                                               alpha,
+                                               B,
+                                               offset_Bin,
+                                               ldb,
+                                               stride_B,
+                                               batch_count);
 
                 // remaining blocks
                 for(i = m - jb - BLOCK; i >= 0; i -= BLOCK)
                 {
                     //{32, 35, 32, 32, 35, 35}
-                    rocblas_internal_gemm_template<BATCHED>(handle,
-                                                            transA,
-                                                            transB,
-                                                            BLOCK,
-                                                            n,
-                                                            BLOCK,
-                                                            &alpha_1<T>,
-                                                            invA,
-                                                            i * size_t(BLOCK) + offset_invAin,
-                                                            BLOCK,
-                                                            stride_invA,
-                                                            (U)B,
-                                                            i + offset_Bin,
-                                                            ldb,
-                                                            stride_B,
-                                                            &beta_0<T>,
-                                                            X,
-                                                            i,
-                                                            m,
-                                                            stride_X,
-                                                            batch_count);
+                    rocblas_internal_gemm<BATCHED>(handle,
+                                                   transA,
+                                                   transB,
+                                                   BLOCK,
+                                                   n,
+                                                   BLOCK,
+                                                   &alpha_1<T>,
+                                                   invA,
+                                                   i * size_t(BLOCK) + offset_invAin,
+                                                   BLOCK,
+                                                   stride_invA,
+                                                   (U)B,
+                                                   i + offset_Bin,
+                                                   ldb,
+                                                   stride_B,
+                                                   &beta_0<T>,
+                                                   X,
+                                                   i,
+                                                   m,
+                                                   stride_X,
+                                                   batch_count);
                     if(i - BLOCK < 0)
                         break;
-                    rocblas_internal_gemm_template<BATCHED>(handle,
-                                                            transA,
-                                                            transB,
-                                                            i,
-                                                            n,
-                                                            BLOCK,
-                                                            &alpha_negative_one<T>,
-                                                            A,
-                                                            i * size_t(lda) + offset_Ain,
-                                                            lda,
-                                                            stride_A,
-                                                            (U)X,
-                                                            i,
-                                                            m,
-                                                            stride_X,
-                                                            &beta_1<T>,
-                                                            B,
-                                                            offset_Bin,
-                                                            ldb,
-                                                            stride_B,
-                                                            batch_count);
+                    rocblas_internal_gemm<BATCHED>(handle,
+                                                   transA,
+                                                   transB,
+                                                   i,
+                                                   n,
+                                                   BLOCK,
+                                                   &alpha_negative_one<T>,
+                                                   A,
+                                                   i * size_t(lda) + offset_Ain,
+                                                   lda,
+                                                   stride_A,
+                                                   (U)X,
+                                                   i,
+                                                   m,
+                                                   stride_X,
+                                                   &beta_1<T>,
+                                                   B,
+                                                   offset_Bin,
+                                                   ldb,
+                                                   stride_B,
+                                                   batch_count);
                 }
             }
         }
@@ -516,98 +555,98 @@ rocblas_status rocblas_trsm_left(rocblas_handle    handle,
             // left, lower transpose
             jb = (m % BLOCK == 0) ? BLOCK : (m % BLOCK);
             i  = m - jb;
-            rocblas_internal_gemm_template<BATCHED>(handle,
-                                                    transA,
-                                                    transB,
-                                                    jb,
-                                                    n,
-                                                    jb,
-                                                    alpha,
-                                                    invA,
-                                                    i * size_t(BLOCK) + offset_invAin,
-                                                    BLOCK,
-                                                    stride_invA,
-                                                    (U)B,
-                                                    i + offset_Bin,
-                                                    ldb,
-                                                    stride_B,
-                                                    &beta_0<T>,
-                                                    X,
-                                                    i,
-                                                    m,
-                                                    stride_X,
-                                                    batch_count);
+            rocblas_internal_gemm<BATCHED>(handle,
+                                           transA,
+                                           transB,
+                                           jb,
+                                           n,
+                                           jb,
+                                           alpha,
+                                           invA,
+                                           i * size_t(BLOCK) + offset_invAin,
+                                           BLOCK,
+                                           stride_invA,
+                                           (U)B,
+                                           i + offset_Bin,
+                                           ldb,
+                                           stride_B,
+                                           &beta_0<T>,
+                                           X,
+                                           i,
+                                           m,
+                                           stride_X,
+                                           batch_count);
             if(i - BLOCK >= 0)
             {
-                rocblas_internal_gemm_template<BATCHED>(handle,
-                                                        transA,
-                                                        transB,
-                                                        i,
-                                                        n,
-                                                        jb,
-                                                        &alpha_negative_one<T>,
-                                                        A,
-                                                        i + offset_Ain,
-                                                        lda,
-                                                        stride_A,
-                                                        (U)X,
-                                                        i,
-                                                        m,
-                                                        stride_X,
-                                                        alpha,
-                                                        B,
-                                                        offset_Bin,
-                                                        ldb,
-                                                        stride_B,
-                                                        batch_count);
+                rocblas_internal_gemm<BATCHED>(handle,
+                                               transA,
+                                               transB,
+                                               i,
+                                               n,
+                                               jb,
+                                               &alpha_negative_one<T>,
+                                               A,
+                                               i + offset_Ain,
+                                               lda,
+                                               stride_A,
+                                               (U)X,
+                                               i,
+                                               m,
+                                               stride_X,
+                                               alpha,
+                                               B,
+                                               offset_Bin,
+                                               ldb,
+                                               stride_B,
+                                               batch_count);
 
                 // remaining blocks
                 for(i = m - jb - BLOCK; i >= 0; i -= BLOCK)
                 {
-                    rocblas_internal_gemm_template<BATCHED>(handle,
-                                                            transA,
-                                                            transB,
-                                                            BLOCK,
-                                                            n,
-                                                            BLOCK,
-                                                            &alpha_1<T>,
-                                                            invA,
-                                                            i * size_t(BLOCK) + offset_invAin,
-                                                            BLOCK,
-                                                            stride_invA,
-                                                            (U)B,
-                                                            i + offset_Bin,
-                                                            ldb,
-                                                            stride_B,
-                                                            &beta_0<T>,
-                                                            X,
-                                                            i,
-                                                            m,
-                                                            stride_X,
-                                                            batch_count);
+                    rocblas_internal_gemm<BATCHED>(handle,
+                                                   transA,
+                                                   transB,
+                                                   BLOCK,
+                                                   n,
+                                                   BLOCK,
+                                                   &alpha_1<T>,
+                                                   invA,
+                                                   i * size_t(BLOCK) + offset_invAin,
+                                                   BLOCK,
+                                                   stride_invA,
+                                                   (U)B,
+                                                   i + offset_Bin,
+                                                   ldb,
+                                                   stride_B,
+                                                   &beta_0<T>,
+                                                   X,
+                                                   i,
+                                                   m,
+                                                   stride_X,
+                                                   batch_count);
                     if(i - BLOCK < 0)
                         break;
-                    rocblas_internal_gemm_template<BATCHED>(handle,
-                                                            transA,
-                                                            transB,
-                                                            i,
-                                                            n,
-                                                            BLOCK,
-                                                            &alpha_negative_one<T>,
-                                                            A,
-                                                            i + offset_Ain,
-                                                            lda,
-                                                            stride_A,
-                                                            (U)X,
-                                                            i,
-                                                            m,
-                                                            stride_X,
-                                                            &beta_1<T>,
-                                                            B,
-                                                            offset_Bin,
-                                                            ldb,
-                                                            stride_B,
-                                                            batch_count);
+                    rocblas_internal_gemm<BATCHED>(handle,
+                                                   transA,
+                                                   transB,
+                                                   i,
+                                                   n,
+                                                   BLOCK,
+                                                   &alpha_negative_one<T>,
+                                                   A,
+                                                   i + offset_Ain,
+                                                   lda,
+                                                   stride_A,
+                                                   (U)X,
+                                                   i,
+                                                   m,
+                                                   stride_X,
+                                                   &beta_1<T>,
+                                                   B,
+                                                   offset_Bin,
+                                                   ldb,
+                                                   stride_B,
+                                                   batch_count);
                 }
             }
         }
@@ -615,100 +654,99 @@ rocblas_status rocblas_trsm_left(rocblas_handle    handle,
         {
             // left, upper transpose
             jb = std::min(BLOCK, m);
-            rocblas_internal_gemm_template<BATCHED>(handle,
-                                                    transA,
-                                                    transB,
-                                                    jb,
-                                                    n,
-                                                    jb,
-                                                    alpha,
-                                                    invA,
-                                                    offset_invAin,
-                                                    BLOCK,
-                                                    stride_invA,
-                                                    (U)B,
-                                                    offset_Bin,
-                                                    ldb,
-                                                    stride_B,
-                                                    &beta_0<T>,
-                                                    X,
-                                                    rocblas_int(0),
-                                                    m,
-                                                    stride_X,
-                                                    batch_count);
+            rocblas_internal_gemm<BATCHED>(handle,
+                                           transA,
+                                           transB,
+                                           jb,
+                                           n,
+                                           jb,
+                                           alpha,
+                                           invA,
+                                           offset_invAin,
+                                           BLOCK,
+                                           stride_invA,
+                                           (U)B,
+                                           offset_Bin,
+                                           ldb,
+                                           stride_B,
+                                           &beta_0<T>,
+                                           X,
+                                           rocblas_int(0),
+                                           m,
+                                           stride_X,
+                                           batch_count);
             if(BLOCK < m)
             {
-                rocblas_internal_gemm_template<BATCHED>(handle,
-                                                        transA,
-                                                        transB,
-                                                        m - BLOCK,
-                                                        n,
-                                                        BLOCK,
-                                                        &alpha_negative_one<T>,
-                                                        A,
-                                                        BLOCK * size_t(lda) + offset_Ain,
-                                                        lda,
-                                                        stride_A,
-                                                        (U)X,
-                                                        rocblas_int(0),
-                                                        m,
-                                                        stride_X,
-                                                        alpha,
-                                                        B,
-                                                        BLOCK + offset_Bin,
-                                                        ldb,
-                                                        stride_B,
-                                                        batch_count);
+                rocblas_internal_gemm<BATCHED>(handle,
+                                               transA,
+                                               transB,
+                                               m - BLOCK,
+                                               n,
+                                               BLOCK,
+                                               &alpha_negative_one<T>,
+                                               A,
+                                               BLOCK * size_t(lda) + offset_Ain,
+                                               lda,
+                                               stride_A,
+                                               (U)X,
+                                               rocblas_int(0),
+                                               m,
+                                               stride_X,
+                                               alpha,
+                                               B,
+                                               BLOCK + offset_Bin,
+                                               ldb,
+                                               stride_B,
+                                               batch_count);
 
                 // remaining blocks
                 for(i = BLOCK; i < m; i += BLOCK)
                 {
                     jb = std::min(m - i, BLOCK);
-                    rocblas_internal_gemm_template<BATCHED>(handle,
-                                                            transA,
-                                                            transB,
-                                                            jb,
-                                                            n,
-                                                            jb,
-                                                            &alpha_1<T>,
-                                                            invA,
-                                                            i * size_t(BLOCK) + offset_invAin,
-                                                            BLOCK,
-                                                            stride_invA,
-                                                            (U)B,
-                                                            i + offset_Bin,
-                                                            ldb,
-                                                            stride_B,
-                                                            &beta_0<T>,
-                                                            X,
-                                                            i,
-                                                            m,
-                                                            stride_X,
-                                                            batch_count);
+                    rocblas_internal_gemm<BATCHED>(handle,
+                                                   transA,
+                                                   transB,
+                                                   jb,
+                                                   n,
+                                                   jb,
+                                                   &alpha_1<T>,
+                                                   invA,
+                                                   i * size_t(BLOCK) + offset_invAin,
+                                                   BLOCK,
+                                                   stride_invA,
+                                                   (U)B,
+                                                   i + offset_Bin,
+                                                   ldb,
+                                                   stride_B,
+                                                   &beta_0<T>,
+                                                   X,
+                                                   i,
+                                                   m,
+                                                   stride_X,
+                                                   batch_count);
                     if(i + BLOCK >= m)
                         break;
-                    rocblas_internal_gemm_template<BATCHED>(handle,
-                                                            transA,
-                                                            transB,
-                                                            m - i - BLOCK,
-                                                            n,
-                                                            BLOCK,
-                                                            &alpha_negative_one<T>,
-                                                            A,
-                                                            i + (i + BLOCK) * size_t(lda)
-                                                                + offset_Ain,
-                                                            lda,
-                                                            stride_A,
-                                                            (U)X,
-                                                            i,
-                                                            m,
-                                                            stride_X,
-                                                            &beta_1<T>,
-                                                            B,
-                                                            i + BLOCK + offset_Bin,
-                                                            ldb,
-                                                            stride_B,
-                                                            batch_count);
+                    rocblas_internal_gemm<BATCHED>(handle,
+                                                   transA,
+                                                   transB,
+                                                   m - i - BLOCK,
+                                                   n,
+                                                   BLOCK,
+                                                   &alpha_negative_one<T>,
+                                                   A,
+                                                   i + (i + BLOCK) * size_t(lda) + offset_Ain,
+                                                   lda,
+                                                   stride_A,
+                                                   (U)X,
+                                                   i,
+                                                   m,
+                                                   stride_X,
+                                                   &beta_1<T>,
+                                                   B,
+                                                   i + BLOCK + offset_Bin,
+                                                   ldb,
+                                                   stride_B,
+                                                   batch_count);
                 }
             }
         }
@@ -753,98 +791,98 @@ rocblas_status rocblas_trsm_right(rocblas_handle    handle,
             // right, lower no-transpose
             jb = (n % BLOCK == 0) ? BLOCK : (n % BLOCK);
             i  = n - jb;
-            rocblas_internal_gemm_template<BATCHED>(handle,
-                                                    transB,
-                                                    transA,
-                                                    m,
-                                                    jb,
-                                                    jb,
-                                                    alpha,
-                                                    U(B),
-                                                    i * size_t(ldb) + offset_Bin,
-                                                    ldb,
-                                                    stride_B,
-                                                    invA,
-                                                    i * size_t(BLOCK) + offset_invAin,
-                                                    BLOCK,
-                                                    stride_invA,
-                                                    &beta_0<T>,
-                                                    X,
-                                                    i * size_t(m),
-                                                    m,
-                                                    stride_X,
-                                                    batch_count);
+            rocblas_internal_gemm<BATCHED>(handle,
+                                           transB,
+                                           transA,
+                                           m,
+                                           jb,
+                                           jb,
+                                           alpha,
+                                           U(B),
+                                           i * size_t(ldb) + offset_Bin,
+                                           ldb,
+                                           stride_B,
+                                           invA,
+                                           i * size_t(BLOCK) + offset_invAin,
+                                           BLOCK,
+                                           stride_invA,
+                                           &beta_0<T>,
+                                           X,
+                                           i * size_t(m),
+                                           m,
+                                           stride_X,
+                                           batch_count);
             if(i - BLOCK >= 0)
             {
-                rocblas_internal_gemm_template<BATCHED>(handle,
-                                                        transB,
-                                                        transA,
-                                                        m,
-                                                        i,
-                                                        jb,
-                                                        &alpha_negative_one<T>,
-                                                        (U)X,
-                                                        i * size_t(m),
-                                                        m,
-                                                        stride_X,
-                                                        A,
-                                                        i + offset_Ain,
-                                                        lda,
-                                                        stride_A,
-                                                        alpha,
-                                                        B,
-                                                        offset_Bin,
-                                                        ldb,
-                                                        stride_B,
-                                                        batch_count);
+                rocblas_internal_gemm<BATCHED>(handle,
+                                               transB,
+                                               transA,
+                                               m,
+                                               i,
+                                               jb,
+                                               &alpha_negative_one<T>,
+                                               (U)X,
+                                               i * size_t(m),
+                                               m,
+                                               stride_X,
+                                               A,
+                                               i + offset_Ain,
+                                               lda,
+                                               stride_A,
+                                               alpha,
+                                               B,
+                                               offset_Bin,
+                                               ldb,
+                                               stride_B,
+                                               batch_count);
 
                 // remaining blocks
                 for(i = n - jb - BLOCK; i >= 0; i -= BLOCK)
                 {
-                    rocblas_internal_gemm_template<BATCHED>(handle,
-                                                            transB,
-                                                            transA,
-                                                            m,
-                                                            BLOCK,
-                                                            BLOCK,
-                                                            &alpha_1<T>,
-                                                            (U)B,
-                                                            i * size_t(ldb) + offset_Bin,
-                                                            ldb,
-                                                            stride_B,
-                                                            invA,
-                                                            i * size_t(BLOCK) + offset_invAin,
-                                                            BLOCK,
-                                                            stride_invA,
-                                                            &beta_0<T>,
-                                                            X,
-                                                            i * size_t(m),
-                                                            m,
-                                                            stride_X,
-                                                            batch_count);
+                    rocblas_internal_gemm<BATCHED>(handle,
+                                                   transB,
+                                                   transA,
+                                                   m,
+                                                   BLOCK,
+                                                   BLOCK,
+                                                   &alpha_1<T>,
+                                                   (U)B,
+                                                   i * size_t(ldb) + offset_Bin,
+                                                   ldb,
+                                                   stride_B,
+                                                   invA,
+                                                   i * size_t(BLOCK) + offset_invAin,
+                                                   BLOCK,
+                                                   stride_invA,
+                                                   &beta_0<T>,
+                                                   X,
+                                                   i * size_t(m),
+                                                   m,
+                                                   stride_X,
+                                                   batch_count);
                     if(i - BLOCK < 0)
                         break;
-                    rocblas_internal_gemm_template<BATCHED>(handle,
-                                                            transB,
-                                                            transA,
-                                                            m,
-                                                            i,
-                                                            BLOCK,
-                                                            &alpha_negative_one<T>,
-                                                            (U)X,
-                                                            i * size_t(m),
-                                                            m,
-                                                            stride_X,
-                                                            A,
-                                                            i + offset_Ain,
-                                                            lda,
-                                                            stride_A,
-                                                            &beta_1<T>,
-                                                            B,
-                                                            offset_Bin,
-                                                            ldb,
-                                                            stride_B,
-                                                            batch_count);
+                    rocblas_internal_gemm<BATCHED>(handle,
+                                                   transB,
+                                                   transA,
+                                                   m,
+                                                   i,
+                                                   BLOCK,
+                                                   &alpha_negative_one<T>,
+                                                   (U)X,
+                                                   i * size_t(m),
+                                                   m,
+                                                   stride_X,
+                                                   A,
+                                                   i + offset_Ain,
+                                                   lda,
+                                                   stride_A,
+                                                   &beta_1<T>,
+                                                   B,
+                                                   offset_Bin,
+                                                   ldb,
+                                                   stride_B,
+                                                   batch_count);
                 }
             }
         }
@@ -852,100 +890,99 @@ rocblas_status rocblas_trsm_right(rocblas_handle    handle,
         {
             // right, upper no-transpose
             jb = std::min(BLOCK, n);
-            rocblas_internal_gemm_template<BATCHED>(handle,
-                                                    transB,
-                                                    transA,
-                                                    m,
-                                                    jb,
-                                                    jb,
-                                                    alpha,
-                                                    (U)B,
-                                                    offset_Bin,
-                                                    ldb,
-                                                    stride_B,
-                                                    invA,
-                                                    offset_invAin,
-                                                    BLOCK,
-                                                    stride_invA,
-                                                    &beta_0<T>,
-                                                    X,
-                                                    rocblas_int(0),
-                                                    m,
-                                                    stride_X,
-                                                    batch_count);
+            rocblas_internal_gemm<BATCHED>(handle,
+                                           transB,
+                                           transA,
+                                           m,
+                                           jb,
+                                           jb,
+                                           alpha,
+                                           (U)B,
+                                           offset_Bin,
+                                           ldb,
+                                           stride_B,
+                                           invA,
+                                           offset_invAin,
+                                           BLOCK,
+                                           stride_invA,
+                                           &beta_0<T>,
+                                           X,
+                                           rocblas_int(0),
+                                           m,
+                                           stride_X,
+                                           batch_count);
             if(BLOCK < n)
             {
-                rocblas_internal_gemm_template<BATCHED>(handle,
-                                                        transB,
-                                                        transA,
-                                                        m,
-                                                        n - BLOCK,
-                                                        BLOCK,
-                                                        &alpha_negative_one<T>,
-                                                        (U)X,
-                                                        rocblas_int(0),
-                                                        m,
-                                                        stride_X,
-                                                        A,
-                                                        BLOCK * size_t(lda) + offset_Ain,
-                                                        lda,
-                                                        stride_A,
-                                                        alpha,
-                                                        B,
-                                                        BLOCK * size_t(ldb) + offset_Bin,
-                                                        ldb,
-                                                        stride_B,
-                                                        batch_count);
+                rocblas_internal_gemm<BATCHED>(handle,
+                                               transB,
+                                               transA,
+                                               m,
+                                               n - BLOCK,
+                                               BLOCK,
+                                               &alpha_negative_one<T>,
+                                               (U)X,
+                                               rocblas_int(0),
+                                               m,
+                                               stride_X,
+                                               A,
+                                               BLOCK * size_t(lda) + offset_Ain,
+                                               lda,
+                                               stride_A,
+                                               alpha,
+                                               B,
+                                               BLOCK * size_t(ldb) + offset_Bin,
+                                               ldb,
+                                               stride_B,
+                                               batch_count);
 
                 // remaining blocks
                 for(i = BLOCK; i < n; i += BLOCK)
                 {
                     jb = std::min(BLOCK, n - i);
-                    rocblas_internal_gemm_template<BATCHED>(handle,
-                                                            transB,
-                                                            transA,
-                                                            m,
-                                                            jb,
-                                                            jb,
-                                                            &alpha_1<T>,
-                                                            (U)B,
-                                                            i * size_t(ldb) + offset_Bin,
-                                                            ldb,
-                                                            stride_B,
-                                                            invA,
-                                                            i * size_t(BLOCK) + offset_invAin,
-                                                            BLOCK,
-                                                            stride_invA,
-                                                            &beta_0<T>,
-                                                            X,
-                                                            i * size_t(m),
-                                                            m,
-                                                            stride_X,
-                                                            batch_count);
+                    rocblas_internal_gemm<BATCHED>(handle,
+                                                   transB,
+                                                   transA,
+                                                   m,
+                                                   jb,
+                                                   jb,
+                                                   &alpha_1<T>,
+                                                   (U)B,
+                                                   i * size_t(ldb) + offset_Bin,
+                                                   ldb,
+                                                   stride_B,
+                                                   invA,
+                                                   i * size_t(BLOCK) + offset_invAin,
+                                                   BLOCK,
+                                                   stride_invA,
+                                                   &beta_0<T>,
+                                                   X,
+                                                   i * size_t(m),
+                                                   m,
+                                                   stride_X,
+                                                   batch_count);
                     if(i + BLOCK >= n)
                         break;
-                    rocblas_internal_gemm_template<BATCHED>(handle,
-                                                            transB,
-                                                            transA,
-                                                            m,
-                                                            n - i - BLOCK,
-                                                            BLOCK,
-                                                            &alpha_negative_one<T>,
-                                                            (U)X,
-                                                            i * size_t(m),
-                                                            m,
-                                                            stride_X,
-                                                            A,
-                                                            i + (i + BLOCK) * size_t(lda)
-                                                                + offset_Ain,
-                                                            lda,
-                                                            stride_A,
-                                                            &beta_1<T>,
-                                                            B,
-                                                            (i + BLOCK) * size_t(ldb) + offset_Bin,
-                                                            ldb,
-                                                            stride_B,
-                                                            batch_count);
+                    rocblas_internal_gemm<BATCHED>(handle,
+                                                   transB,
+                                                   transA,
+                                                   m,
+                                                   n - i - BLOCK,
+                                                   BLOCK,
+                                                   &alpha_negative_one<T>,
+                                                   (U)X,
+                                                   i * size_t(m),
+                                                   m,
+                                                   stride_X,
+                                                   A,
+                                                   i + (i + BLOCK) * size_t(lda) + offset_Ain,
+                                                   lda,
+                                                   stride_A,
+                                                   &beta_1<T>,
+                                                   B,
+                                                   (i + BLOCK) * size_t(ldb) + offset_Bin,
+                                                   ldb,
+                                                   stride_B,
+                                                   batch_count);
                 }
             }
         }
@@ -956,100 +993,99 @@ rocblas_status rocblas_trsm_right(rocblas_handle    handle,
         {
             // right, lower transpose
             jb = std::min(BLOCK, n);
-            rocblas_internal_gemm_template<BATCHED>(handle,
-                                                    transB,
-                                                    transA,
-                                                    m,
-                                                    jb,
-                                                    jb,
-                                                    alpha,
-                                                    U(B),
-                                                    offset_Bin,
-                                                    ldb,
-                                                    stride_B,
-                                                    invA,
-                                                    offset_invAin,
-                                                    BLOCK,
-                                                    stride_invA,
-                                                    &beta_0<T>,
-                                                    X,
-                                                    rocblas_int(0),
-                                                    m,
-                                                    stride_X,
-                                                    batch_count);
+            rocblas_internal_gemm<BATCHED>(handle,
+                                           transB,
+                                           transA,
+                                           m,
+                                           jb,
+                                           jb,
+                                           alpha,
+                                           U(B),
+                                           offset_Bin,
+                                           ldb,
+                                           stride_B,
+                                           invA,
+                                           offset_invAin,
+                                           BLOCK,
+                                           stride_invA,
+                                           &beta_0<T>,
+                                           X,
+                                           rocblas_int(0),
+                                           m,
+                                           stride_X,
+                                           batch_count);
             if(BLOCK < n)
             {
-                rocblas_internal_gemm_template<BATCHED>(handle,
-                                                        transB,
-                                                        transA,
-                                                        m,
-                                                        n - BLOCK,
-                                                        BLOCK,
-                                                        &alpha_negative_one<T>,
-                                                        U(X),
-                                                        rocblas_int(0),
-                                                        m,
-                                                        stride_X,
-                                                        A,
-                                                        BLOCK + offset_Ain,
-                                                        lda,
-                                                        stride_A,
-                                                        alpha,
-                                                        B,
-                                                        BLOCK * size_t(ldb) + offset_Bin,
-                                                        ldb,
-                                                        stride_B,
-                                                        batch_count);
+                rocblas_internal_gemm<BATCHED>(handle,
+                                               transB,
+                                               transA,
+                                               m,
+                                               n - BLOCK,
+                                               BLOCK,
+                                               &alpha_negative_one<T>,
+                                               U(X),
+                                               rocblas_int(0),
+                                               m,
+                                               stride_X,
+                                               A,
+                                               BLOCK + offset_Ain,
+                                               lda,
+                                               stride_A,
+                                               alpha,
+                                               B,
+                                               BLOCK * size_t(ldb) + offset_Bin,
+                                               ldb,
+                                               stride_B,
+                                               batch_count);
 
                 // remaining blocks
                 for(i = BLOCK; i < n; i += BLOCK)
                 {
                     jb = std::min(BLOCK, n - i);
-                    rocblas_internal_gemm_template<BATCHED>(handle,
-                                                            transB,
-                                                            transA,
-                                                            m,
-                                                            jb,
-                                                            jb,
-                                                            &alpha_1<T>,
-                                                            (U)B,
-                                                            i * size_t(ldb) + offset_Bin,
-                                                            ldb,
-                                                            stride_B,
-                                                            invA,
-                                                            i * size_t(BLOCK) + offset_invAin,
-                                                            BLOCK,
-                                                            stride_invA,
-                                                            &beta_0<T>,
-                                                            X,
-                                                            i * size_t(m),
-                                                            m,
-                                                            stride_X,
-                                                            batch_count);
+                    rocblas_internal_gemm<BATCHED>(handle,
+                                                   transB,
+                                                   transA,
+                                                   m,
+                                                   jb,
+                                                   jb,
+                                                   &alpha_1<T>,
+                                                   (U)B,
+                                                   i * size_t(ldb) + offset_Bin,
+                                                   ldb,
+                                                   stride_B,
+                                                   invA,
+                                                   i * size_t(BLOCK) + offset_invAin,
+                                                   BLOCK,
+                                                   stride_invA,
+                                                   &beta_0<T>,
+                                                   X,
+                                                   i * size_t(m),
+                                                   m,
+                                                   stride_X,
+                                                   batch_count);
                     if(i + BLOCK >= n)
                         break;
-                    rocblas_internal_gemm_template<BATCHED>(handle,
-                                                            transB,
-                                                            transA,
-                                                            m,
-                                                            n - i - BLOCK,
-                                                            BLOCK,
-                                                            &alpha_negative_one<T>,
-                                                            (U)X,
-                                                            i * size_t(m),
-                                                            m,
-                                                            stride_X,
-                                                            A,
-                                                            BLOCK + i + i * size_t(lda)
-                                                                + offset_Ain,
-                                                            lda,
-                                                            stride_A,
-                                                            &beta_1<T>,
-                                                            B,
-                                                            (i + BLOCK) * size_t(ldb) + offset_Bin,
-                                                            ldb,
-                                                            stride_B,
-                                                            batch_count);
+                    rocblas_internal_gemm<BATCHED>(handle,
+                                                   transB,
+                                                   transA,
+                                                   m,
+                                                   n - i - BLOCK,
+                                                   BLOCK,
+                                                   &alpha_negative_one<T>,
+                                                   (U)X,
+                                                   i * size_t(m),
+                                                   m,
+                                                   stride_X,
+                                                   A,
+                                                   BLOCK + i + i * size_t(lda) + offset_Ain,
+                                                   lda,
+                                                   stride_A,
+                                                   &beta_1<T>,
+                                                   B,
+                                                   (i + BLOCK) * size_t(ldb) + offset_Bin,
+                                                   ldb,
+                                                   stride_B,
+                                                   batch_count);
                 }
             }
         }
@@ -1058,98 +1094,98 @@ rocblas_status rocblas_trsm_right(rocblas_handle    handle,
             // right, upper transpose
             jb = (n % BLOCK == 0) ? BLOCK : (n % BLOCK);
             i  = n - jb;
-            rocblas_internal_gemm_template<BATCHED>(handle,
-                                                    transB,
-                                                    transA,
-                                                    m,
-                                                    jb,
-                                                    jb,
-                                                    alpha,
-                                                    (U)B,
-                                                    i * size_t(ldb) + offset_Bin,
-                                                    ldb,
-                                                    stride_B,
-                                                    invA,
-                                                    i * size_t(BLOCK) + offset_invAin,
-                                                    BLOCK,
-                                                    stride_invA,
-                                                    &beta_0<T>,
-                                                    X,
-                                                    i * size_t(m),
-                                                    m,
-                                                    stride_X,
-                                                    batch_count);
+            rocblas_internal_gemm<BATCHED>(handle,
+                                           transB,
+                                           transA,
+                                           m,
+                                           jb,
+                                           jb,
+                                           alpha,
+                                           (U)B,
+                                           i * size_t(ldb) + offset_Bin,
+                                           ldb,
+                                           stride_B,
+                                           invA,
+                                           i * size_t(BLOCK) + offset_invAin,
+                                           BLOCK,
+                                           stride_invA,
+                                           &beta_0<T>,
+                                           X,
+                                           i * size_t(m),
+                                           m,
+                                           stride_X,
+                                           batch_count);
             if(i - BLOCK >= 0)
             {
-                rocblas_internal_gemm_template<BATCHED>(handle,
-                                                        transB,
-                                                        transA,
-                                                        m,
-                                                        i,
-                                                        jb,
-                                                        &alpha_negative_one<T>,
-                                                        (U)X,
-                                                        i * size_t(m),
-                                                        m,
-                                                        stride_X,
-                                                        A,
-                                                        i * size_t(lda) + offset_Ain,
-                                                        lda,
-                                                        stride_A,
-                                                        alpha,
-                                                        B,
-                                                        offset_Bin,
-                                                        ldb,
-                                                        stride_B,
-                                                        batch_count);
+                rocblas_internal_gemm<BATCHED>(handle,
+                                               transB,
+                                               transA,
+                                               m,
+                                               i,
+                                               jb,
+                                               &alpha_negative_one<T>,
+                                               (U)X,
+                                               i * size_t(m),
+                                               m,
+                                               stride_X,
+                                               A,
+                                               i * size_t(lda) + offset_Ain,
+                                               lda,
+                                               stride_A,
+                                               alpha,
+                                               B,
+                                               offset_Bin,
+                                               ldb,
+                                               stride_B,
+                                               batch_count);
 
                 // remaining blocks
                 for(i = n - jb - BLOCK; i >= 0; i -= BLOCK)
                 {
-                    rocblas_internal_gemm_template<BATCHED>(handle,
-                                                            transB,
-                                                            transA,
-                                                            m,
-                                                            BLOCK,
-                                                            BLOCK,
-                                                            &alpha_1<T>,
-                                                            (U)B,
-                                                            i * size_t(ldb) + offset_Bin,
-                                                            ldb,
-                                                            stride_B,
-                                                            invA,
-                                                            i * size_t(BLOCK) + offset_invAin,
-                                                            BLOCK,
-                                                            stride_invA,
-                                                            &beta_0<T>,
-                                                            X,
-                                                            i * size_t(m),
-                                                            m,
-                                                            stride_X,
-                                                            batch_count);
+                    rocblas_internal_gemm<BATCHED>(handle,
+                                                   transB,
+                                                   transA,
+                                                   m,
+                                                   BLOCK,
+                                                   BLOCK,
+                                                   &alpha_1<T>,
+                                                   (U)B,
+                                                   i * size_t(ldb) + offset_Bin,
+                                                   ldb,
+                                                   stride_B,
+                                                   invA,
+                                                   i * size_t(BLOCK) + offset_invAin,
+                                                   BLOCK,
+                                                   stride_invA,
+                                                   &beta_0<T>,
+                                                   X,
+                                                   i * size_t(m),
+                                                   m,
+                                                   stride_X,
+                                                   batch_count);
                     if(i - BLOCK < 0)
                         break;
-                    rocblas_internal_gemm_template<BATCHED>(handle,
-                                                            transB,
-                                                            transA,
-                                                            m,
-                                                            i,
-                                                            BLOCK,
-                                                            &alpha_negative_one<T>,
-                                                            (U)X,
-                                                            i * size_t(m),
-                                                            m,
-                                                            stride_X,
-                                                            A,
-                                                            i * size_t(lda) + offset_Ain,
-                                                            lda,
-                                                            stride_A,
-                                                            &beta_1<T>,
-                                                            B,
-                                                            offset_Bin,
-                                                            ldb,
-                                                            stride_B,
-                                                            batch_count);
+                    rocblas_internal_gemm<BATCHED>(handle,
+                                                   transB,
+                                                   transA,
+                                                   m,
+                                                   i,
+                                                   BLOCK,
+                                                   &alpha_negative_one<T>,
+                                                   (U)X,
+                                                   i * size_t(m),
+                                                   m,
+                                                   stride_X,
+                                                   A,
+                                                   i * size_t(lda) + offset_Ain,
+                                                   lda,
+                                                   stride_A,
+                                                   &beta_1<T>,
+                                                   B,
+                                                   offset_Bin,
+                                                   ldb,
+                                                   stride_B,
+                                                   batch_count);
                 }
             }
         }
@@ -1204,18 +1240,18 @@ rocblas_status special_trsm_template(rocblas_handle    handle,
 
                 // copy a BLOCK*n piece we are solving at a time
                 if(!r || !tensile_supports_ldc_ne_ldd)
-                    copy_block_unit<T>(handle,
-                                       BLOCK,
-                                       width,
-                                       B,
-                                       ldb,
-                                       stride_B,
-                                       w_x_temp,
-                                       BLOCK,
-                                       stride_X,
-                                       batch_count,
-                                       j * BLOCK + w * B_chunk_size * ldb + offset_Bin,
-                                       0);
+                    rocblas_copy_block_unit<T>(handle,
+                                               BLOCK,
+                                               width,
+                                               B,
+                                               ldb,
+                                               stride_B,
+                                               w_x_temp,
+                                               BLOCK,
+                                               stride_X,
+                                               batch_count,
+                                               j * BLOCK + w * B_chunk_size * ldb + offset_Bin,
+                                               0);
 
                 if(r)
                 {
@@ -1231,27 +1267,27 @@ rocblas_status special_trsm_template(rocblas_handle    handle,
 
                     if(!tensile_supports_ldc_ne_ldd)
                     {
-                        rocblas_internal_gemm_template<BATCHED>(handle,
-                                                                transA,
-                                                                rocblas_operation_none,
-                                                                BLOCK,
-                                                                width,
-                                                                r * BLOCK,
-                                                                &alpha_negative_one<T>,
-                                                                A,
-                                                                offsetA + offset_Ain,
-                                                                lda,
-                                                                stride_A,
-                                                                (U)B,
-                                                                offsetB + offset_Bin,
-                                                                ldb,
-                                                                stride_B,
-                                                                alpha,
-                                                                w_x_temp,
-                                                                rocblas_int(0),
-                                                                BLOCK,
-                                                                stride_X,
-                                                                batch_count);
+                        rocblas_internal_gemm<BATCHED>(handle,
+                                                       transA,
+                                                       rocblas_operation_none,
+                                                       BLOCK,
+                                                       width,
+                                                       r * BLOCK,
+                                                       &alpha_negative_one<T>,
+                                                       A,
+                                                       offsetA + offset_Ain,
+                                                       lda,
+                                                       stride_A,
+                                                       (U)B,
+                                                       offsetB + offset_Bin,
+                                                       ldb,
+                                                       stride_B,
+                                                       alpha,
+                                                       w_x_temp,
+                                                       rocblas_int(0),
+                                                       BLOCK,
+                                                       stride_X,
+                                                       batch_count);
                     }
                     else
                     {
@@ -1297,7 +1333,7 @@ rocblas_status special_trsm_template(rocblas_handle    handle,
                     }
                 }
 
-                rocblas_internal_gemm_template<BATCHED>(
+                rocblas_internal_gemm<BATCHED>(
                     handle,
                     transA,
                     rocblas_operation_none,
@@ -1330,18 +1366,19 @@ rocblas_status special_trsm_template(rocblas_handle    handle,
 
                 // copy a m*BLOCK piece we are solving at a time
                 if(!r || !tensile_supports_ldc_ne_ldd)
-                    copy_block_unit<T>(handle,
-                                       width,
-                                       BLOCK,
-                                       B,
-                                       ldb,
-                                       stride_B,
-                                       w_x_temp,
-                                       width,
-                                       stride_X,
-                                       batch_count,
-                                       j * BLOCK * size_t(ldb) + w * B_chunk_size + offset_Bin,
-                                       0);
+                    rocblas_copy_block_unit<T>(handle,
+                                               width,
+                                               BLOCK,
+                                               B,
+                                               ldb,
+                                               stride_B,
+                                               w_x_temp,
+                                               width,
+                                               stride_X,
+                                               batch_count,
+                                               j * BLOCK * size_t(ldb) + w * B_chunk_size
+                                                   + offset_Bin,
+                                               0);
 
                 if(r)
                 {
@@ -1356,27 +1393,27 @@ rocblas_status special_trsm_template(rocblas_handle    handle,
 
                     if(!tensile_supports_ldc_ne_ldd)
                     {
-                        rocblas_internal_gemm_template<BATCHED>(handle,
-                                                                rocblas_operation_none,
-                                                                transA,
-                                                                width,
-                                                                BLOCK,
-                                                                r * BLOCK,
-                                                                &alpha_negative_one<T>,
-                                                                (U)B,
-                                                                size_t(offsetB + offset_Bin),
-                                                                size_t(ldb),
-                                                                stride_B,
-                                                                A,
-                                                                size_t(offsetA + offset_Ain),
-                                                                size_t(lda),
-                                                                stride_A,
-                                                                alpha,
-                                                                w_x_temp,
-                                                                size_t(0),
-                                                                width,
-                                                                stride_X,
-                                                                batch_count);
+                        rocblas_internal_gemm<BATCHED>(handle,
+                                                       rocblas_operation_none,
+                                                       transA,
+                                                       width,
+                                                       BLOCK,
+                                                       r * BLOCK,
+                                                       &alpha_negative_one<T>,
+                                                       (U)B,
+                                                       size_t(offsetB + offset_Bin),
+                                                       size_t(ldb),
+                                                       stride_B,
+                                                       A,
+                                                       size_t(offsetA + offset_Ain),
+                                                       size_t(lda),
+                                                       stride_A,
+                                                       alpha,
+                                                       w_x_temp,
+                                                       size_t(0),
+                                                       width,
+                                                       stride_X,
+                                                       batch_count);
                     }
                     else
                     {
@@ -1422,7 +1459,7 @@ rocblas_status special_trsm_template(rocblas_handle    handle,
                     }
                 }
 
-                rocblas_internal_gemm_template<BATCHED>(
+                rocblas_internal_gemm<BATCHED>(
                     handle,
                     rocblas_operation_none,
                     transA,
@@ -1678,7 +1715,7 @@ rocblas_status rocblas_internal_trsm_workspace_size(rocblas_side      side,
 
     // no memory needed if using small kernels
     bool is_small = (k <= 32) || (m <= 64 && n <= 64);
-    if(is_small)
+    if(is_small || !batch_count)
     {
         // return rocblas_status_continue indicating no memory needed
         *w_x_tmp_size        = 0;
@@ -1720,6 +1757,8 @@ rocblas_status rocblas_internal_trsm_workspace_size(rocblas_side      side,
         invA_temp_bytes = BLOCK * k * sizeof(T) * batch_count;
 
         // When k < BLOCK, C is unnecessary for trtri
+        // c_temp is not scaled by batch_count as trtri kernels are currently naive and
+        // just iterate through the batches using the same workspace memory
         c_temp_bytes = ((k / BLOCK) * ((BLOCK / 2) * (BLOCK / 2))) * sizeof(T);
 
         // For the TRTRI last diagonal block we need remainder space if k % BLOCK != 0
@@ -1969,256 +2008,268 @@ rocblas_trsm_small_right_device(rocblas_fill      uplo,
                                 BTYPE             Ba,
                                 rocblas_stride    offset_B,
                                 int               ldb,
-                                rocblas_stride    stride_B)
+                                rocblas_stride    stride_B,
+                                int               batch_count)
 {
-    const int batchid = blockIdx.y;
-    auto      A       = load_ptr_batch(Aa, batchid, offset_A, stride_A);
-    auto      B       = load_ptr_batch(Ba, batchid, offset_B, stride_B);
-    auto      alpha   = load_scalar(alpha_dev_host);
+    auto alpha = load_scalar(alpha_dev_host);
 
-    bool      LOWER = uplo == rocblas_fill_lower;
-    bool      CONJ  = transA == rocblas_operation_conjugate_transpose;
-    const int tx    = threadIdx.x;
-    const int bx    = blockIdx.x;
+    uint32_t batchid = blockIdx.z;
 
-    // max A column to read from
-    int maxColA = NB - 1 > n - 1 ? n - 1 : NB - 1;
-    // NB columns, unless last block, then do leftover
-    const int maxColB = (bx < gridDim.x - 1) ? NB : m - bx * NB;
-
-    // offset B into correct block row
-    B += size_t(bx) * NB;
-
-    __shared__ T sA[NB * NB];
-    __shared__ T sB[NB * NB];
-
-    T resB[4];
-
-    if(tx <= maxColA)
+#if DEVICE_GRID_YZ_16BIT
+    for(; batchid < batch_count; batchid += c_YZ_grid_launch_limit)
     {
-        // Load A into sA, handle conjugation if necessary
-        for(int i = 0; i <= maxColA; i++)
-            sA[i * NB + tx] = (CONJ) ? conj(A[i * size_t(lda) + tx]) : A[i * size_t(lda) + tx];
+#endif
 
-        // set unit diagonal if needed
-        if(diag == rocblas_diagonal_unit)
-            sA[tx * NB + tx] = T(1.0);
+        auto A = load_ptr_batch(Aa, batchid, offset_A, stride_A);
+        auto B = load_ptr_batch(Ba, batchid, offset_B, stride_B);
+
+        bool      LOWER = uplo == rocblas_fill_lower;
+        bool      CONJ  = transA == rocblas_operation_conjugate_transpose;
+        const int tx    = threadIdx.x;
+        const int bx    = blockIdx.x;
+
+        // max A column to read from
+        int maxColA = NB - 1 > n - 1 ? n - 1 : NB - 1;
+        // NB columns, unless last block, then do leftover
+        const int maxColB = (bx < gridDim.x - 1) ? NB : m - bx * NB;
+
+        // offset B into correct block row
+        B += size_t(bx) * NB;
+
+        __shared__ T sA[NB * NB];
+        __shared__ T sB[NB * NB];
+
+        T resB[4];
+
+        if(tx <= maxColA)
+        {
+            // Load A into sA, handle conjugation if necessary
+            for(int i = 0; i <= maxColA; i++)
+                sA[i * NB + tx] = (CONJ) ? conj(A[i * size_t(lda) + tx]) : A[i * size_t(lda) + tx];
+
+            // set unit diagonal if needed
+            if(diag == rocblas_diagonal_unit)
+                sA[tx * NB + tx] = T(1.0);
+        }
+
+        if(tx < maxColB)
+        {
+            // Load B into sB and multiply by alpha
+            for(int i = 0; i < n; i++)
+                sB[i * NB + tx] = alpha * B[i * size_t(ldb) + tx];
+        }
+        __syncthreads();
+
+        // Solve for B in shared memory
+        if(transA == rocblas_operation_none && uplo == rocblas_fill_upper)
+        {
+            int i;
+            for(i = 0; i + 3 <= maxColA; i += 4)
+            {
+                // Subtract previously solved parts
+                resB[0] = sB[(i + 0) * NB + tx];
+                resB[1] = sB[(i + 1) * NB + tx];
+                resB[2] = sB[(i + 2) * NB + tx];
+                resB[3] = sB[(i + 3) * NB + tx];
+
+                for(int j = 0; j < i; j++)
+                {
+                    T sB_reg = sB[j * NB + tx];
+                    resB[0] -= sB_reg * sA[(i + 0) * NB + j];
+                    resB[1] -= sB_reg * sA[(i + 1) * NB + j];
+                    resB[2] -= sB_reg * sA[(i + 2) * NB + j];
+                    resB[3] -= sB_reg * sA[(i + 3) * NB + j];
+                }
+
+                resB[0] /= sA[(i + 0) * NB + (i + 0)];
+                sB[(i + 0) * NB + tx] = resB[0];
+
+                resB[1] -= resB[0] * sA[(i + 1) * NB + (i + 0)];
+                resB[1] /= sA[(i + 1) * NB + (i + 1)];
+                sB[(i + 1) * NB + tx] = resB[1];
+
+                resB[2] -= resB[0] * sA[(i + 2) * NB + (i + 0)];
+                resB[2] -= resB[1] * sA[(i + 2) * NB + (i + 1)];
+                resB[2] /= sA[(i + 2) * NB + (i + 2)];
+                sB[(i + 2) * NB + tx] = resB[2];
+
+                resB[3] -= resB[0] * sA[(i + 3) * NB + (i + 0)];
+                resB[3] -= resB[1] * sA[(i + 3) * NB + (i + 1)];
+                resB[3] -= resB[2] * sA[(i + 3) * NB + (i + 2)];
+                resB[3] /= sA[(i + 3) * NB + (i + 3)];
+                sB[(i + 3) * NB + tx] = resB[3];
+            }
+
+            // tail end if not divisible by 4
+            for(; i <= maxColA; i++)
+            {
+                resB[0] = sB[i * NB + tx];
+                for(int j = 0; j < i; j++)
+                {
+                    resB[0] -= sB[j * NB + tx] * sA[i * NB + j];
+                }
+                sB[i * NB + tx] = resB[0] / sA[i * NB + i];
+            }
+        }
+        else if(transA == rocblas_operation_none && uplo == rocblas_fill_lower)
+        {
+            int i;
+            for(i = maxColA; i >= 3; i -= 4)
+            {
+                resB[0] = sB[(i - 0) * NB + tx];
+                resB[1] = sB[(i - 1) * NB + tx];
+                resB[2] = sB[(i - 2) * NB + tx];
+                resB[3] = sB[(i - 3) * NB + tx];
+
+                for(int j = maxColA; j > i; j--)
+                {
+                    T sB_reg = sB[j * NB + tx];
+                    resB[0] -= sB_reg * sA[(i - 0) * NB + j];
+                    resB[1] -= sB_reg * sA[(i - 1) * NB + j];
+                    resB[2] -= sB_reg * sA[(i - 2) * NB + j];
+                    resB[3] -= sB_reg * sA[(i - 3) * NB + j];
+                }
+
+                resB[0] /= sA[(i - 0) * NB + (i - 0)];
+                sB[(i - 0) * NB + tx] = resB[0];
+
+                resB[1] -= resB[0] * sA[(i - 1) * NB + (i - 0)];
+                resB[1] /= sA[(i - 1) * NB + (i - 1)];
+                sB[(i - 1) * NB + tx] = resB[1];
+
+                resB[2] -= resB[0] * sA[(i - 2) * NB + (i - 0)];
+                resB[2] -= resB[1] * sA[(i - 2) * NB + (i - 1)];
+                resB[2] /= sA[(i - 2) * NB + (i - 2)];
+                sB[(i - 2) * NB + tx] = resB[2];
+
+                resB[3] -= resB[0] * sA[(i - 3) * NB + (i - 0)];
+                resB[3] -= resB[1] * sA[(i - 3) * NB + (i - 1)];
+                resB[3] -= resB[2] * sA[(i - 3) * NB + (i - 2)];
+                resB[3] /= sA[(i - 3) * NB + (i - 3)];
+                sB[(i - 3) * NB + tx] = resB[3];
+            }
+
+            for(; i >= 0; i--)
+            {
+                resB[0] = sB[i * NB + tx];
+                for(int j = maxColA; j > i; j--)
+                {
+                    resB[0] -= sB[j * NB + tx] * sA[i * NB + j];
+                }
+                sB[i * NB + tx] = resB[0] / sA[i * NB + i];
+            }
+        }
+        else if(uplo == rocblas_fill_upper)
+        {
+            int i;
+            for(i = maxColA; i >= 3; i -= 4)
+            {
+                resB[0] = sB[(i - 0) * NB + tx];
+                resB[1] = sB[(i - 1) * NB + tx];
+                resB[2] = sB[(i - 2) * NB + tx];
+                resB[3] = sB[(i - 3) * NB + tx];
+
+                for(int j = maxColA; j > i; j--)
+                {
+                    rocblas_int col_off = j * NB;
+                    T           sB_reg  = sB[col_off + tx];
+                    resB[0] -= sB_reg * sA[col_off + (i - 0)];
+                    resB[1] -= sB_reg * sA[col_off + (i - 1)];
+                    resB[2] -= sB_reg * sA[col_off + (i - 2)];
+                    resB[3] -= sB_reg * sA[col_off + (i - 3)];
+                }
+
+                resB[0] /= sA[(i - 0) * NB + (i - 0)];
+                sB[(i - 0) * NB + tx] = resB[0];
+
+                resB[1] -= resB[0] * sA[(i - 0) * NB + (i - 1)];
+                resB[1] /= sA[(i - 1) * NB + (i - 1)];
+                sB[(i - 1) * NB + tx] = resB[1];
+
+                resB[2] -= resB[0] * sA[(i - 0) * NB + (i - 2)];
+                resB[2] -= resB[1] * sA[(i - 1) * NB + (i - 2)];
+                resB[2] /= sA[(i - 2) * NB + (i - 2)];
+                sB[(i - 2) * NB + tx] = resB[2];
+
+                resB[3] -= resB[0] * sA[(i - 0) * NB + (i - 3)];
+                resB[3] -= resB[1] * sA[(i - 1) * NB + (i - 3)];
+                resB[3] -= resB[2] * sA[(i - 2) * NB + (i - 3)];
+                resB[3] /= sA[(i - 3) * NB + (i - 3)];
+                sB[(i - 3) * NB + tx] = resB[3];
+            }
+
+            for(; i >= 0; i--)
+            {
+                resB[0] = sB[i * NB + tx];
+                for(int j = maxColA; j > i; j--)
+                {
+                    resB[0] -= sB[j * NB + tx] * sA[j * NB + i];
+                }
+                sB[i * NB + tx] = resB[0] / sA[i * NB + i];
+            }
+        }
+        else // lower (conjugate-)transpose
+        {
+            int i;
+            for(i = 0; i + 3 <= maxColA; i += 4)
+            {
+                // Subtract previously solved parts
+                resB[0] = sB[(i + 0) * NB + tx];
+                resB[1] = sB[(i + 1) * NB + tx];
+                resB[2] = sB[(i + 2) * NB + tx];
+                resB[3] = sB[(i + 3) * NB + tx];
+
+                for(int j = 0; j < i; j++)
+                {
+                    rocblas_int col_off = j * NB;
+                    T           sB_reg  = sB[col_off + tx];
+                    resB[0] -= sB_reg * sA[col_off + (i + 0)];
+                    resB[1] -= sB_reg * sA[col_off + (i + 1)];
+                    resB[2] -= sB_reg * sA[col_off + (i + 2)];
+                    resB[3] -= sB_reg * sA[col_off + (i + 3)];
+                }
+
+                resB[0] /= sA[(i + 0) * NB + (i + 0)];
+                sB[(i + 0) * NB + tx] = resB[0];
+
+                resB[1] -= resB[0] * sA[(i + 0) * NB + (i + 1)];
+                resB[1] /= sA[(i + 1) * NB + (i + 1)];
+                sB[(i + 1) * NB + tx] = resB[1];
+
+                resB[2] -= resB[0] * sA[(i + 0) * NB + (i + 2)];
+                resB[2] -= resB[1] * sA[(i + 1) * NB + (i + 2)];
+                resB[2] /= sA[(i + 2) * NB + (i + 2)];
+                sB[(i + 2) * NB + tx] = resB[2];
+
+                resB[3] -= resB[0] * sA[(i + 0) * NB + (i + 3)];
+                resB[3] -= resB[1] * sA[(i + 1) * NB + (i + 3)];
+                resB[3] -= resB[2] * sA[(i + 2) * NB + (i + 3)];
+                resB[3] /= sA[(i + 3) * NB + (i + 3)];
+                sB[(i + 3) * NB + tx] = resB[3];
+            }
+
+            // tail end if not divisible by 4
+            for(; i <= maxColA; i++)
+            {
+                resB[0] = sB[i * NB + tx];
+                for(int j = 0; j < i; j++)
+                {
+                    resB[0] -= sB[j * NB + tx] * sA[j * NB + i];
+                }
+                sB[i * NB + tx] = resB[0] / sA[i * NB + i];
+            }
+        }
+
+        // Save shared memory back into B
+        if(tx < maxColB)
+        {
+            for(int i = 0; i < n; i++)
+                B[i * size_t(ldb) + tx] = sB[i * NB + tx];
+        }
+
+#if DEVICE_GRID_YZ_16BIT
     }
-
-    if(tx < maxColB)
-    {
-        // Load B into sB and multiply by alpha
-        for(int i = 0; i < n; i++)
-            sB[i * NB + tx] = alpha * B[i * size_t(ldb) + tx];
-    }
-    __syncthreads();
-
-    // Solve for B in shared memory
-    if(transA == rocblas_operation_none && uplo == rocblas_fill_upper)
-    {
-        int i;
-        for(i = 0; i + 3 <= maxColA; i += 4)
-        {
-            // Subtract previously solved parts
-            resB[0] = sB[(i + 0) * NB + tx];
-            resB[1] = sB[(i + 1) * NB + tx];
-            resB[2] = sB[(i + 2) * NB + tx];
-            resB[3] = sB[(i + 3) * NB + tx];
-
-            for(int j = 0; j < i; j++)
-            {
-                T sB_reg = sB[j * NB + tx];
-                resB[0] -= sB_reg * sA[(i + 0) * NB + j];
-                resB[1] -= sB_reg * sA[(i + 1) * NB + j];
-                resB[2] -= sB_reg * sA[(i + 2) * NB + j];
-                resB[3] -= sB_reg * sA[(i + 3) * NB + j];
-            }
-
-            resB[0] /= sA[(i + 0) * NB + (i + 0)];
-            sB[(i + 0) * NB + tx] = resB[0];
-
-            resB[1] -= resB[0] * sA[(i + 1) * NB + (i + 0)];
-            resB[1] /= sA[(i + 1) * NB + (i + 1)];
-            sB[(i + 1) * NB + tx] = resB[1];
-
-            resB[2] -= resB[0] * sA[(i + 2) * NB + (i + 0)];
-            resB[2] -= resB[1] * sA[(i + 2) * NB + (i + 1)];
-            resB[2] /= sA[(i + 2) * NB + (i + 2)];
-            sB[(i + 2) * NB + tx] = resB[2];
-
-            resB[3] -= resB[0] * sA[(i + 3) * NB + (i + 0)];
-            resB[3] -= resB[1] * sA[(i + 3) * NB + (i + 1)];
-            resB[3] -= resB[2] * sA[(i + 3) * NB + (i + 2)];
-            resB[3] /= sA[(i + 3) * NB + (i + 3)];
-            sB[(i + 3) * NB + tx] = resB[3];
-        }
-
-        // tail end if not divisible by 4
-        for(; i <= maxColA; i++)
-        {
-            resB[0] = sB[i * NB + tx];
-            for(int j = 0; j < i; j++)
-            {
-                resB[0] -= sB[j * NB + tx] * sA[i * NB + j];
-            }
-            sB[i * NB + tx] = resB[0] / sA[i * NB + i];
-        }
-    }
-    else if(transA == rocblas_operation_none && uplo == rocblas_fill_lower)
-    {
-        int i;
-        for(i = maxColA; i >= 3; i -= 4)
-        {
-            resB[0] = sB[(i - 0) * NB + tx];
-            resB[1] = sB[(i - 1) * NB + tx];
-            resB[2] = sB[(i - 2) * NB + tx];
-            resB[3] = sB[(i - 3) * NB + tx];
-
-            for(int j = maxColA; j > i; j--)
-            {
-                T sB_reg = sB[j * NB + tx];
-                resB[0] -= sB_reg * sA[(i - 0) * NB + j];
-                resB[1] -= sB_reg * sA[(i - 1) * NB + j];
-                resB[2] -= sB_reg * sA[(i - 2) * NB + j];
-                resB[3] -= sB_reg * sA[(i - 3) * NB + j];
-            }
-
-            resB[0] /= sA[(i - 0) * NB + (i - 0)];
-            sB[(i - 0) * NB + tx] = resB[0];
-
-            resB[1] -= resB[0] * sA[(i - 1) * NB + (i - 0)];
-            resB[1] /= sA[(i - 1) * NB + (i - 1)];
-            sB[(i - 1) * NB + tx] = resB[1];
-
-            resB[2] -= resB[0] * sA[(i - 2) * NB + (i - 0)];
-            resB[2] -= resB[1] * sA[(i - 2) * NB + (i - 1)];
-            resB[2] /= sA[(i - 2) * NB + (i - 2)];
-            sB[(i - 2) * NB + tx] = resB[2];
-
-            resB[3] -= resB[0] * sA[(i - 3) * NB + (i - 0)];
-            resB[3] -= resB[1] * sA[(i - 3) * NB + (i - 1)];
-            resB[3] -= resB[2] * sA[(i - 3) * NB + (i - 2)];
-            resB[3] /= sA[(i - 3) * NB + (i - 3)];
-            sB[(i - 3) * NB + tx] = resB[3];
-        }
-
-        for(; i >= 0; i--)
-        {
-            resB[0] = sB[i * NB + tx];
-            for(int j = maxColA; j > i; j--)
-            {
-                resB[0] -= sB[j * NB + tx] * sA[i * NB + j];
-            }
-            sB[i * NB + tx] = resB[0] / sA[i * NB + i];
-        }
-    }
-    else if(uplo == rocblas_fill_upper)
-    {
-        int i;
-        for(i = maxColA; i >= 3; i -= 4)
-        {
-            resB[0] = sB[(i - 0) * NB + tx];
-            resB[1] = sB[(i - 1) * NB + tx];
-            resB[2] = sB[(i - 2) * NB + tx];
-            resB[3] = sB[(i - 3) * NB + tx];
-
-            for(int j = maxColA; j > i; j--)
-            {
-                rocblas_int col_off = j * NB;
-                T           sB_reg  = sB[col_off + tx];
-                resB[0] -= sB_reg * sA[col_off + (i - 0)];
-                resB[1] -= sB_reg * sA[col_off + (i - 1)];
-                resB[2] -= sB_reg * sA[col_off + (i - 2)];
-                resB[3] -= sB_reg * sA[col_off + (i - 3)];
-            }
-
-            resB[0] /= sA[(i - 0) * NB + (i - 0)];
-            sB[(i - 0) * NB + tx] = resB[0];
-
-            resB[1] -= resB[0] * sA[(i - 0) * NB + (i - 1)];
-            resB[1] /= sA[(i - 1) * NB + (i - 1)];
-            sB[(i - 1) * NB + tx] = resB[1];
-
-            resB[2] -= resB[0] * sA[(i - 0) * NB + (i - 2)];
-            resB[2] -= resB[1] * sA[(i - 1) * NB + (i - 2)];
-            resB[2] /= sA[(i - 2) * NB + (i - 2)];
-            sB[(i - 2) * NB + tx] = resB[2];
-
-            resB[3] -= resB[0] * sA[(i - 0) * NB + (i - 3)];
-            resB[3] -= resB[1] * sA[(i - 1) * NB + (i - 3)];
-            resB[3] -= resB[2] * sA[(i - 2) * NB + (i - 3)];
-            resB[3] /= sA[(i - 3) * NB + (i - 3)];
-            sB[(i - 3) * NB + tx] = resB[3];
-        }
-
-        for(; i >= 0; i--)
-        {
-            resB[0] = sB[i * NB + tx];
-            for(int j = maxColA; j > i; j--)
-            {
-                resB[0] -= sB[j * NB + tx] * sA[j * NB + i];
-            }
-            sB[i * NB + tx] = resB[0] / sA[i * NB + i];
-        }
-    }
-    else // lower (conjugate-)transpose
-    {
-        int i;
-        for(i = 0; i + 3 <= maxColA; i += 4)
-        {
-            // Subtract previously solved parts
-            resB[0] = sB[(i + 0) * NB + tx];
-            resB[1] = sB[(i + 1) * NB + tx];
-            resB[2] = sB[(i + 2) * NB + tx];
-            resB[3] = sB[(i + 3) * NB + tx];
-
-            for(int j = 0; j < i; j++)
-            {
-                rocblas_int col_off = j * NB;
-                T           sB_reg  = sB[col_off + tx];
-                resB[0] -= sB_reg * sA[col_off + (i + 0)];
-                resB[1] -= sB_reg * sA[col_off + (i + 1)];
-                resB[2] -= sB_reg * sA[col_off + (i + 2)];
-                resB[3] -= sB_reg * sA[col_off + (i + 3)];
-            }
-
-            resB[0] /= sA[(i + 0) * NB + (i + 0)];
-            sB[(i + 0) * NB + tx] = resB[0];
-
-            resB[1] -= resB[0] * sA[(i + 0) * NB + (i + 1)];
-            resB[1] /= sA[(i + 1) * NB + (i + 1)];
-            sB[(i + 1) * NB + tx] = resB[1];
-
-            resB[2] -= resB[0] * sA[(i + 0) * NB + (i + 2)];
-            resB[2] -= resB[1] * sA[(i + 1) * NB + (i + 2)];
-            resB[2] /= sA[(i + 2) * NB + (i + 2)];
-            sB[(i + 2) * NB + tx] = resB[2];
-
-            resB[3] -= resB[0] * sA[(i + 0) * NB + (i + 3)];
-            resB[3] -= resB[1] * sA[(i + 1) * NB + (i + 3)];
-            resB[3] -= resB[2] * sA[(i + 2) * NB + (i + 3)];
-            resB[3] /= sA[(i + 3) * NB + (i + 3)];
-            sB[(i + 3) * NB + tx] = resB[3];
-        }
-
-        // tail end if not divisible by 4
-        for(; i <= maxColA; i++)
-        {
-            resB[0] = sB[i * NB + tx];
-            for(int j = 0; j < i; j++)
-            {
-                resB[0] -= sB[j * NB + tx] * sA[j * NB + i];
-            }
-            sB[i * NB + tx] = resB[0] / sA[i * NB + i];
-        }
-    }
-
-    // Save shared memory back into B
-    if(tx < maxColB)
-    {
-        for(int i = 0; i < n; i++)
-            B[i * size_t(ldb) + tx] = sB[i * NB + tx];
-    }
+#endif
 }
 
 /*
@@ -2241,107 +2292,119 @@ rocblas_trsm_small_64_right_device(rocblas_fill      uplo,
                                    BTYPE             Ba,
                                    rocblas_stride    offset_B,
                                    int               ldb,
-                                   rocblas_stride    stride_B)
+                                   rocblas_stride    stride_B,
+                                   int               batch_count)
 {
-    const int batchid = blockIdx.y;
-    auto      A       = load_ptr_batch(Aa, batchid, offset_A, stride_A);
-    auto      B       = load_ptr_batch(Ba, batchid, offset_B, stride_B);
-    auto      alpha   = load_scalar(alpha_dev_host);
+    auto alpha = load_scalar(alpha_dev_host);
 
-    bool      LOWER = uplo == rocblas_fill_lower;
-    bool      CONJ  = transA == rocblas_operation_conjugate_transpose;
-    const int tx    = threadIdx.x;
-    const int bx    = blockIdx.x;
+    uint32_t batchid = blockIdx.z;
 
-    // max A column to read from
-    int maxColA = NB - 1 > n - 1 ? n - 1 : NB - 1;
-    // NB columns, unless last block, then do leftover
-    const int maxColB = (bx < gridDim.x - 1) ? NB : m - bx * NB;
-
-    // offset B into correct block row
-    B += bx * size_t(NB);
-
-    __shared__ T sB[NB * NB];
-
-    if(tx < maxColB)
+#if DEVICE_GRID_YZ_16BIT
+    for(; batchid < batch_count; batchid += c_YZ_grid_launch_limit)
     {
-        // Load B into sB and multiply by alpha
-        for(int i = 0; i < n; i++)
-            sB[i * NB + tx] = alpha * B[i * size_t(ldb) + tx];
-    }
-    __syncthreads();
-    // Solve for B in shared memory
-    if(transA == rocblas_operation_none && uplo == rocblas_fill_upper)
-    {
-        // Note: I didn't find that using 4 registers (as in the above function) to be noticeably faster in this version
+#endif
 
-        for(int i = 0; i <= maxColA; i++)
+        auto A = load_ptr_batch(Aa, batchid, offset_A, stride_A);
+        auto B = load_ptr_batch(Ba, batchid, offset_B, stride_B);
+
+        bool      LOWER = uplo == rocblas_fill_lower;
+        bool      CONJ  = transA == rocblas_operation_conjugate_transpose;
+        const int tx    = threadIdx.x;
+        const int bx    = blockIdx.x;
+
+        // max A column to read from
+        int maxColA = NB - 1 > n - 1 ? n - 1 : NB - 1;
+        // NB columns, unless last block, then do leftover
+        const int maxColB = (bx < gridDim.x - 1) ? NB : m - bx * NB;
+
+        // offset B into correct block row
+        B += bx * size_t(NB);
+
+        __shared__ T sB[NB * NB];
+
+        if(tx < maxColB)
         {
-            // Subtract previously solved parts
-            T temp_reg_B = sB[i * NB + tx];
-            for(int j = 0; j < i; j++)
-            {
-                T valA = A[i * size_t(lda) + j];
-                temp_reg_B -= sB[j * NB + tx] * valA;
-            }
-            // Solve
-            sB[i * NB + tx] = temp_reg_B;
-            if(diag != rocblas_diagonal_unit)
-                sB[i * NB + tx] /= A[i * size_t(lda) + i];
+            // Load B into sB and multiply by alpha
+            for(int i = 0; i < n; i++)
+                sB[i * NB + tx] = alpha * B[i * size_t(ldb) + tx];
         }
-    }
-    else if(transA == rocblas_operation_none && uplo == rocblas_fill_lower)
-    {
-        for(int i = maxColA; i >= 0; i--)
+        __syncthreads();
+        // Solve for B in shared memory
+        if(transA == rocblas_operation_none && uplo == rocblas_fill_upper)
         {
-            T temp_reg_B = sB[i * NB + tx];
-            for(int j = maxColA; j > i; j--)
-            {
-                T valA = A[i * size_t(lda) + j];
-                temp_reg_B -= sB[j * NB + tx] * valA;
-            }
-            sB[i * NB + tx] = temp_reg_B;
-            if(diag != rocblas_diagonal_unit)
-                sB[i * NB + tx] /= A[i * size_t(lda) + i];
-        }
-    }
-    else if(uplo == rocblas_fill_upper)
-    {
-        for(int i = maxColA; i >= 0; i--)
-        {
-            T temp_reg_B = sB[i * NB + tx];
-            for(int j = maxColA; j > i; j--)
-            {
-                T valA = CONJ ? conj(A[j * size_t(lda) + i]) : A[j * size_t(lda) + i];
-                temp_reg_B -= sB[j * NB + tx] * valA;
-            }
-            sB[i * NB + tx] = temp_reg_B;
-            if(diag != rocblas_diagonal_unit)
-                sB[i * NB + tx] /= CONJ ? conj(A[i * size_t(lda) + i]) : A[i * size_t(lda) + i];
-        }
-    }
-    else // lower (conjugate-)transpose
-    {
-        for(int i = 0; i <= maxColA; i++)
-        {
-            T temp_reg_B = sB[i * NB + tx];
-            for(int j = 0; j < i; j++)
-            {
-                T valA = CONJ ? conj(A[j * size_t(lda) + i]) : A[j * size_t(lda) + i];
-                temp_reg_B -= sB[j * NB + tx] * valA;
-            }
-            sB[i * NB + tx] = temp_reg_B;
-            if(diag != rocblas_diagonal_unit)
-                sB[i * NB + tx] /= CONJ ? conj(A[i * size_t(lda) + i]) : A[i * size_t(lda) + i];
-        }
-    }
+            // Note: I didn't find that using 4 registers (as in the above function) to be noticeably faster in this version
 
-    // Save shared memory back into B
-    if(tx < maxColB)
-    {
-        for(int i = 0; i < n; i++)
-            B[i * size_t(ldb) + tx] = sB[i * NB + tx];
+            for(int i = 0; i <= maxColA; i++)
+            {
+                // Subtract previously solved parts
+                T temp_reg_B = sB[i * NB + tx];
+                for(int j = 0; j < i; j++)
+                {
+                    T valA = A[i * size_t(lda) + j];
+                    temp_reg_B -= sB[j * NB + tx] * valA;
+                }
+                // Solve
+                sB[i * NB + tx] = temp_reg_B;
+                if(diag != rocblas_diagonal_unit)
+                    sB[i * NB + tx] /= A[i * size_t(lda) + i];
+            }
+        }
+        else if(transA == rocblas_operation_none && uplo == rocblas_fill_lower)
+        {
+            for(int i = maxColA; i >= 0; i--)
+            {
+                T temp_reg_B = sB[i * NB + tx];
+                for(int j = maxColA; j > i; j--)
+                {
+                    T valA = A[i * size_t(lda) + j];
+                    temp_reg_B -= sB[j * NB + tx] * valA;
+                }
+                sB[i * NB + tx] = temp_reg_B;
+                if(diag != rocblas_diagonal_unit)
+                    sB[i * NB + tx] /= A[i * size_t(lda) + i];
+            }
+        }
+        else if(uplo == rocblas_fill_upper)
+        {
+            for(int i = maxColA; i >= 0; i--)
+            {
+                T temp_reg_B = sB[i * NB + tx];
+                for(int j = maxColA; j > i; j--)
+                {
+                    T valA = CONJ ? conj(A[j * size_t(lda) + i]) : A[j * size_t(lda) + i];
+                    temp_reg_B -= sB[j * NB + tx] * valA;
+                }
+                sB[i * NB + tx] = temp_reg_B;
+                if(diag != rocblas_diagonal_unit)
+                    sB[i * NB + tx] /= CONJ ? conj(A[i * size_t(lda) + i]) : A[i * size_t(lda) + i];
+            }
+        }
+        else // lower (conjugate-)transpose
+        {
+            for(int i = 0; i <= maxColA; i++)
+            {
+                T temp_reg_B = sB[i * NB + tx];
+                for(int j = 0; j < i; j++)
+                {
+                    T valA = CONJ ? conj(A[j * size_t(lda) + i]) : A[j * size_t(lda) + i];
+                    temp_reg_B -= sB[j * NB + tx] * valA;
+                }
+                sB[i * NB + tx] = temp_reg_B;
+                if(diag != rocblas_diagonal_unit)
+                    sB[i * NB + tx] /= CONJ ? conj(A[i * size_t(lda) + i]) : A[i * size_t(lda) + i];
+            }
+        }
+
+        // Save shared memory back into B
+        if(tx < maxColB)
+        {
+            for(int i = 0; i < n; i++)
+                B[i * size_t(ldb) + tx] = sB[i * NB + tx];
+        }
+
+#if DEVICE_GRID_YZ_16BIT
     }
+#endif
 }
 
 /* T = float, double, etc.
@@ -2353,8 +2416,6 @@ rocblas_trsm_small_64_right_device(rocblas_fill      uplo,
  */
 template <const int NB,
           const int STEP_SIZE,
-          bool      CONJ,
-          bool      TRANSA,
           bool      LOWER,
           typename T,
           typename SCAL,
@@ -2374,191 +2435,202 @@ rocblas_trsm_small_left_device(rocblas_fill      uplo,
                                BTYPE             Ba,
                                rocblas_stride    offset_B,
                                int               ldb,
-                               rocblas_stride    stride_B)
+                               rocblas_stride    stride_B,
+                               int               batch_count)
 {
-    const int batchid = blockIdx.y;
-    auto      A       = load_ptr_batch(Aa, batchid, offset_A, stride_A);
-    auto      B       = load_ptr_batch(Ba, batchid, offset_B, stride_B);
-    auto      alpha   = load_scalar(alpha_dev_host);
+    bool CONJ  = transA == rocblas_operation_conjugate_transpose;
+    auto alpha = load_scalar(alpha_dev_host);
 
-    const int tx = threadIdx.x;
-    const int bx = blockIdx.x;
+    uint32_t batchid = blockIdx.z;
 
-    // max A column to read from
-    int maxColA = NB - 1 > m - 1 ? m - 1 : NB - 1;
-    // NB columns, unless last block, then do leftover
-    const int maxColB = (bx < gridDim.x - 1) ? NB : n - bx * NB;
-
-    constexpr int num_step_sizes = 3;
-    constexpr int step_size_1    = STEP_SIZE;
-    constexpr int step_size_2    = STEP_SIZE < NB ? (4) : // special case for NB = 64
-                                    (NB - 4) > 0 ? (NB - 4)
-                                                    : 1;
-    constexpr int step_sizes[]   = {step_size_1, step_size_2, 1};
-
-    // offset B into correct block column
-    B += (tx + bx * NB) * size_t(ldb);
-
-    // shared A, registers for B
-    __shared__ T sA[NB * NB];
-    T            resB[step_size_1];
-
-    if(tx <= maxColA)
+#if DEVICE_GRID_YZ_16BIT
+    for(; batchid < batch_count; batchid += c_YZ_grid_launch_limit)
     {
-        for(int i = 0; i <= maxColA; i++)
+#endif
+        auto A = load_ptr_batch(Aa, batchid, offset_A, stride_A);
+        auto B = load_ptr_batch(Ba, batchid, offset_B, stride_B);
+
+        const int tx = threadIdx.x;
+        const int bx = blockIdx.x;
+
+        // max A column to read from
+        int maxColA = NB - 1 > m - 1 ? m - 1 : NB - 1;
+        // NB columns, unless last block, then do leftover
+        const int maxColB = (bx < gridDim.x - 1) ? NB : n - bx * NB;
+
+        constexpr int num_step_sizes = 3;
+        constexpr int step_size_1    = STEP_SIZE;
+        constexpr int step_size_2    = STEP_SIZE < NB ? (4) : // special case for NB = 64
+                                        (NB - 4) > 0 ? (NB - 4)
+                                                        : 1;
+        constexpr int step_sizes[]   = {step_size_1, step_size_2, 1};
+
+        // offset B into correct block column
+        B += (tx + bx * NB) * size_t(ldb);
+
+        // shared A, registers for B
+        __shared__ T sA[NB * NB];
+        T            resB[step_size_1];
+
+        if(tx <= maxColA)
         {
-            // indexing will be transposed for lower-transpose and upper-non-transpose for better memory access
-            sA[i * NB + tx] = (CONJ) ? conj(A[i * size_t(lda) + tx]) : A[i * size_t(lda) + tx];
-        }
-
-        // set unit diagonal if needed
-        if(diag == rocblas_diagonal_unit)
-            sA[tx * NB + tx] = T(1.0);
-        else
-            sA[tx * NB + tx]
-                = T(1.0) / sA[tx * NB + tx]; // invert diagonal here so just have to multiply later
-    }
-    __syncthreads();
-
-    if(tx >= maxColB)
-        return;
-
-    // Solve for B in shared memory
-    if(LOWER && transA == rocblas_operation_none)
-    {
-        int i = 0;
-        for(int idx = 0; idx < num_step_sizes; idx++)
-        {
-            const int step_size = step_sizes[idx];
-            for(; i + (step_size - 1) <= maxColA; i += step_size)
+            for(int i = 0; i <= maxColA; i++)
             {
-                // Subtract previously solved parts
-                for(int j = 0; j < step_size; j++)
-                    resB[j] = alpha * B[i + j];
-
-                for(int j1 = 0; j1 < i; j1++)
-                {
-                    rocblas_int col_off = j1 * NB;
-                    T           sB_reg  = B[j1];
-                    for(int j2 = 0; j2 < step_size; j2++)
-                        resB[j2] -= sB_reg * sA[col_off + i + j2];
-                }
-
-                for(int j1 = 0; j1 < step_size; j1++)
-                {
-                    for(int j2 = 0; j2 < j1; j2++)
-                        resB[j1] -= resB[j2] * sA[(i + j2) * NB + (i + j1)];
-
-                    resB[j1] *= sA[(i + j1) * NB + (i + j1)];
-                    B[i + j1] = resB[j1];
-                }
+                // indexing will be transposed for lower-transpose and upper-non-transpose for better memory access
+                sA[i * NB + tx] = (CONJ) ? conj(A[i * size_t(lda) + tx]) : A[i * size_t(lda) + tx];
             }
-            if(i > maxColA)
-                break;
+
+            // set unit diagonal if needed
+            if(diag == rocblas_diagonal_unit)
+                sA[tx * NB + tx] = T(1.0);
+            else
+                sA[tx * NB + tx]
+                    = T(1.0)
+                      / sA[tx * NB + tx]; // invert diagonal here so just have to multiply later
         }
-    }
-    else if(!LOWER && transA == rocblas_operation_none)
-    {
-        int i = maxColA;
-        for(int idx = 0; idx < num_step_sizes; idx++)
+        __syncthreads();
+
+        if(tx >= maxColB)
+            return;
+
+        // Solve for B in shared memory
+        if(LOWER && transA == rocblas_operation_none)
         {
-            const int step_size = step_sizes[idx];
-            for(; i >= (step_size - 1); i -= step_size)
+            int i = 0;
+            for(int idx = 0; idx < num_step_sizes; idx++)
             {
-                for(int j = 0; j < step_size; j++)
-                    resB[j] = alpha * B[i - j];
-
-                for(int j1 = maxColA; j1 > i; j1--)
+                const int step_size = step_sizes[idx];
+                for(; i + (step_size - 1) <= maxColA; i += step_size)
                 {
-                    rocblas_int col_off = j1;
-                    T           sB_reg  = B[j1];
-                    for(int j2 = 0; j2 < step_size; j2++)
-                        resB[j2] -= sB_reg * sA[(col_off * NB + (i - j2))];
-                }
+                    // Subtract previously solved parts
+                    for(int j = 0; j < step_size; j++)
+                        resB[j] = alpha * B[i + j];
 
-                for(int j1 = 0; j1 < step_size; j1++)
-                {
-                    for(int j2 = 0; j2 < j1; j2++)
-                        resB[j1] -= resB[j2] * sA[(i - j1) + NB * (i - j2)];
+                    for(int j1 = 0; j1 < i; j1++)
+                    {
+                        rocblas_int col_off = j1 * NB;
+                        T           sB_reg  = B[j1];
+                        for(int j2 = 0; j2 < step_size; j2++)
+                            resB[j2] -= sB_reg * sA[col_off + i + j2];
+                    }
 
-                    resB[j1] *= sA[(i - j1) + NB * (i - j1)];
-                    B[i - j1] = resB[j1];
+                    for(int j1 = 0; j1 < step_size; j1++)
+                    {
+                        for(int j2 = 0; j2 < j1; j2++)
+                            resB[j1] -= resB[j2] * sA[(i + j2) * NB + (i + j1)];
+
+                        resB[j1] *= sA[(i + j1) * NB + (i + j1)];
+                        B[i + j1] = resB[j1];
+                    }
                 }
+                if(i > maxColA)
+                    break;
             }
-            if(i < 0)
-                break;
         }
-    }
-    else if(LOWER)
-    {
-        int i = maxColA;
-        for(int idx = 0; idx < num_step_sizes; idx++)
+        else if(!LOWER && transA == rocblas_operation_none)
         {
-            const int step_size = step_sizes[idx];
-            for(; i >= (step_size - 1); i -= step_size)
+            int i = maxColA;
+            for(int idx = 0; idx < num_step_sizes; idx++)
             {
-                for(int j = 0; j < step_size; j++)
-                    resB[j] = alpha * B[i - j];
-
-                for(int j1 = maxColA; j1 > i; j1--)
+                const int step_size = step_sizes[idx];
+                for(; i >= (step_size - 1); i -= step_size)
                 {
-                    rocblas_int col_off = j1;
-                    T           sB_reg  = B[j1];
-                    for(int j2 = 0; j2 < step_size; j2++)
-                        resB[j2] -= sB_reg * sA[(i - j2) * NB + j1];
-                }
+                    for(int j = 0; j < step_size; j++)
+                        resB[j] = alpha * B[i - j];
 
-                for(int j1 = 0; j1 < step_size; j1++)
-                {
-                    for(int j2 = 0; j2 < j1; j2++)
-                        resB[j1] -= resB[j2] * sA[(i - j2) + NB * (i - j1)];
+                    for(int j1 = maxColA; j1 > i; j1--)
+                    {
+                        rocblas_int col_off = j1;
+                        T           sB_reg  = B[j1];
+                        for(int j2 = 0; j2 < step_size; j2++)
+                            resB[j2] -= sB_reg * sA[(col_off * NB + (i - j2))];
+                    }
 
-                    resB[j1] *= sA[(i - j1) + NB * (i - j1)];
-                    B[i - j1] = resB[j1];
+                    for(int j1 = 0; j1 < step_size; j1++)
+                    {
+                        for(int j2 = 0; j2 < j1; j2++)
+                            resB[j1] -= resB[j2] * sA[(i - j1) + NB * (i - j2)];
+
+                        resB[j1] *= sA[(i - j1) + NB * (i - j1)];
+                        B[i - j1] = resB[j1];
+                    }
                 }
+                if(i < 0)
+                    break;
             }
-            if(i < 0)
-                break;
         }
-    }
-    else if(!LOWER)
-    {
-        int i = 0;
-        for(int idx = 0; idx < num_step_sizes; idx++)
+        else if(LOWER)
         {
-            const int step_size = step_sizes[idx];
-            for(; i + (step_size - 1) <= maxColA; i += step_size)
+            int i = maxColA;
+            for(int idx = 0; idx < num_step_sizes; idx++)
             {
-                // Subtract previously solved parts
-                for(int j = 0; j < step_size; j++)
-                    resB[j] = alpha * B[i + j];
-
-                for(int j1 = 0; j1 < i; j1++)
+                const int step_size = step_sizes[idx];
+                for(; i >= (step_size - 1); i -= step_size)
                 {
-                    T sB_reg = B[j1];
-                    for(int j2 = 0; j2 < step_size; j2++)
-                        resB[j2] -= sB_reg * sA[(i + j2) * NB + j1];
-                }
+                    for(int j = 0; j < step_size; j++)
+                        resB[j] = alpha * B[i - j];
 
-                for(int j1 = 0; j1 < step_size; j1++)
-                {
-                    for(int j2 = 0; j2 < j1; j2++)
-                        resB[j1] -= resB[j2] * sA[(i + j1) * NB + (i + j2)];
+                    for(int j1 = maxColA; j1 > i; j1--)
+                    {
+                        rocblas_int col_off = j1;
+                        T           sB_reg  = B[j1];
+                        for(int j2 = 0; j2 < step_size; j2++)
+                            resB[j2] -= sB_reg * sA[(i - j2) * NB + j1];
+                    }
 
-                    resB[j1] *= sA[(i + j1) * NB + (i + j1)];
-                    B[i + j1] = resB[j1];
+                    for(int j1 = 0; j1 < step_size; j1++)
+                    {
+                        for(int j2 = 0; j2 < j1; j2++)
+                            resB[j1] -= resB[j2] * sA[(i - j2) + NB * (i - j1)];
+
+                        resB[j1] *= sA[(i - j1) + NB * (i - j1)];
+                        B[i - j1] = resB[j1];
+                    }
                 }
+                if(i < 0)
+                    break;
             }
-            if(i > maxColA)
-                break;
         }
+        else if(!LOWER)
+        {
+            int i = 0;
+            for(int idx = 0; idx < num_step_sizes; idx++)
+            {
+                const int step_size = step_sizes[idx];
+                for(; i + (step_size - 1) <= maxColA; i += step_size)
+                {
+                    // Subtract previously solved parts
+                    for(int j = 0; j < step_size; j++)
+                        resB[j] = alpha * B[i + j];
+
+                    for(int j1 = 0; j1 < i; j1++)
+                    {
+                        T sB_reg = B[j1];
+                        for(int j2 = 0; j2 < step_size; j2++)
+                            resB[j2] -= sB_reg * sA[(i + j2) * NB + j1];
+                    }
+
+                    for(int j1 = 0; j1 < step_size; j1++)
+                    {
+                        for(int j2 = 0; j2 < j1; j2++)
+                            resB[j1] -= resB[j2] * sA[(i + j1) * NB + (i + j2)];
+
+                        resB[j1] *= sA[(i + j1) * NB + (i + j1)];
+                        B[i + j1] = resB[j1];
+                    }
+                }
+                if(i > maxColA)
+                    break;
+            }
+        }
+
+#if DEVICE_GRID_YZ_16BIT
     }
+#endif
 }
 
 template <const int NB,
           const int STEP_SIZE,
-          bool      CONJ,
-          bool      TRANSA,
           bool      LOWER,
           typename T,
           typename SCAL,
@@ -2578,197 +2650,210 @@ rocblas_trsm_small_left_device_sharedB(rocblas_fill      uplo,
                                        BTYPE             Ba,
                                        rocblas_stride    offset_B,
                                        int               ldb,
-                                       rocblas_stride    stride_B)
+                                       rocblas_stride    stride_B,
+                                       int               batch_count)
 {
-    const int batchid = blockIdx.y;
-    auto      A       = load_ptr_batch(Aa, batchid, offset_A, stride_A);
-    auto      B       = load_ptr_batch(Ba, batchid, offset_B, stride_B);
-    auto      alpha   = load_scalar(alpha_dev_host);
+    bool CONJ  = transA == rocblas_operation_conjugate_transpose;
+    auto alpha = load_scalar(alpha_dev_host);
 
-    const int tx = threadIdx.x;
-    const int bx = blockIdx.x;
+    uint32_t batchid = blockIdx.z;
 
-    // max A column to read from
-    int maxColA = NB - 1 > m - 1 ? m - 1 : NB - 1;
-    // NB columns, unless last block, then do leftover
-    const int maxColB = (bx < gridDim.x - 1) ? NB : n - bx * NB;
-
-    constexpr int num_step_sizes = 3;
-    constexpr int step_size_1    = STEP_SIZE;
-    constexpr int step_size_2    = STEP_SIZE < NB ? (4) : // special case for NB = 64
-                                    (NB - 4) > 0 ? (NB - 4)
-                                                    : 1;
-    constexpr int step_sizes[]   = {step_size_1, step_size_2, 1};
-
-    // offset B into correct block column
-    B += (bx * NB) * size_t(ldb);
-
-    // shared A, registers for B
-    __shared__ T sA[NB * NB];
-    __shared__ T sB[NB * NB];
-    T            resB[step_size_1];
-
-    if(tx <= maxColA)
+#if DEVICE_GRID_YZ_16BIT
+    for(; batchid < batch_count; batchid += c_YZ_grid_launch_limit)
     {
-        for(int i = 0; i <= maxColA; i++)
+#endif
+        auto A = load_ptr_batch(Aa, batchid, offset_A, stride_A);
+        auto B = load_ptr_batch(Ba, batchid, offset_B, stride_B);
+
+        const int tx = threadIdx.x;
+        const int bx = blockIdx.x;
+
+        // max A column to read from
+        int maxColA = NB - 1 > m - 1 ? m - 1 : NB - 1;
+        // NB columns, unless last block, then do leftover
+        const int maxColB = (bx < gridDim.x - 1) ? NB : n - bx * NB;
+
+        constexpr int num_step_sizes = 3;
+        constexpr int step_size_1    = STEP_SIZE;
+        constexpr int step_size_2    = STEP_SIZE < NB ? (4) : // special case for NB = 64
+                                        (NB - 4) > 0 ? (NB - 4)
+                                                        : 1;
+        constexpr int step_sizes[]   = {step_size_1, step_size_2, 1};
+
+        // offset B into correct block column
+        B += (bx * NB) * size_t(ldb);
+
+        // shared A, registers for B
+        __shared__ T sA[NB * NB];
+        __shared__ T sB[NB * NB];
+        T            resB[step_size_1];
+
+        if(tx <= maxColA)
         {
-            // indexing will be transposed for lower-transpose and upper-non-transpose for better memory access
-            sA[i * NB + tx] = (CONJ) ? conj(A[i * size_t(lda) + tx]) : A[i * size_t(lda) + tx];
-        }
-
-        // set unit diagonal if needed
-        if(diag == rocblas_diagonal_unit)
-            sA[tx * NB + tx] = T(1.0);
-        else
-            sA[tx * NB + tx]
-                = T(1.0) / sA[tx * NB + tx]; // invert diagonal here so just have to multiply later
-    }
-
-    // Load B into sB and multiply by alpha, transpose for better mem. access
-    if(tx < maxColB)
-        for(int i = 0; i <= maxColA; i++)
-            sB[tx + NB * i] = alpha * B[i + tx * size_t(ldb)];
-    __syncthreads();
-
-    // Solve for B in shared memory
-    if(LOWER && transA == rocblas_operation_none)
-    {
-        int i = 0;
-        for(int idx = 0; idx < num_step_sizes; idx++)
-        {
-            const int step_size = step_sizes[idx];
-            for(; i + (step_size - 1) <= maxColA; i += step_size)
+            for(int i = 0; i <= maxColA; i++)
             {
-                // Subtract previously solved parts
-                for(int j = 0; j < step_size; j++)
-                    resB[j] = sB[tx + NB * (i + j)];
-
-                for(int j1 = 0; j1 < i; j1++)
-                {
-                    rocblas_int col_off = j1 * NB;
-                    T           sB_reg  = sB[tx + NB * j1];
-                    for(int j2 = 0; j2 < step_size; j2++)
-                        resB[j2] -= sB_reg * sA[col_off + i + j2];
-                }
-
-                for(int j1 = 0; j1 < step_size; j1++)
-                {
-                    for(int j2 = 0; j2 < j1; j2++)
-                        resB[j1] -= resB[j2] * sA[(i + j2) * NB + (i + j1)];
-
-                    resB[j1] *= sA[(i + j1) * NB + (i + j1)];
-                    sB[tx + NB * (i + j1)] = resB[j1];
-                }
+                // indexing will be transposed for lower-transpose and upper-non-transpose for better memory access
+                sA[i * NB + tx] = (CONJ) ? conj(A[i * size_t(lda) + tx]) : A[i * size_t(lda) + tx];
             }
-            if(i > maxColA)
-                break;
+
+            // set unit diagonal if needed
+            if(diag == rocblas_diagonal_unit)
+                sA[tx * NB + tx] = T(1.0);
+            else
+                sA[tx * NB + tx]
+                    = T(1.0)
+                      / sA[tx * NB + tx]; // invert diagonal here so just have to multiply later
         }
-    }
-    else if(!LOWER && transA == rocblas_operation_none)
-    {
-        int i = maxColA;
-        for(int idx = 0; idx < num_step_sizes; idx++)
+
+        // Load B into sB and multiply by alpha, transpose for better mem. access
+        if(tx < maxColB)
+            for(int i = 0; i <= maxColA; i++)
+                sB[tx + NB * i] = alpha * B[i + tx * size_t(ldb)];
+        __syncthreads();
+
+        // Solve for B in shared memory
+        if(LOWER && transA == rocblas_operation_none)
         {
-            const int step_size = step_sizes[idx];
-            for(; i >= (step_size - 1); i -= step_size)
+            int i = 0;
+            for(int idx = 0; idx < num_step_sizes; idx++)
             {
-                for(int j = 0; j < step_size; j++)
-                    resB[j] = sB[tx + NB * (i - j)];
-
-                for(int j1 = maxColA; j1 > i; j1--)
+                const int step_size = step_sizes[idx];
+                for(; i + (step_size - 1) <= maxColA; i += step_size)
                 {
-                    rocblas_int col_off = j1;
-                    T           sB_reg  = sB[tx + NB * j1];
-                    for(int j2 = 0; j2 < step_size; j2++)
-                        resB[j2] -= sB_reg * sA[(col_off * NB + (i - j2))];
-                }
+                    // Subtract previously solved parts
+                    for(int j = 0; j < step_size; j++)
+                        resB[j] = sB[tx + NB * (i + j)];
 
-                for(int j1 = 0; j1 < step_size; j1++)
-                {
-                    for(int j2 = 0; j2 < j1; j2++)
-                        resB[j1] -= resB[j2] * sA[(i - j1) + NB * (i - j2)];
+                    for(int j1 = 0; j1 < i; j1++)
+                    {
+                        rocblas_int col_off = j1 * NB;
+                        T           sB_reg  = sB[tx + NB * j1];
+                        for(int j2 = 0; j2 < step_size; j2++)
+                            resB[j2] -= sB_reg * sA[col_off + i + j2];
+                    }
 
-                    resB[j1] *= sA[(i - j1) + NB * (i - j1)];
-                    sB[tx + NB * (i - j1)] = resB[j1];
+                    for(int j1 = 0; j1 < step_size; j1++)
+                    {
+                        for(int j2 = 0; j2 < j1; j2++)
+                            resB[j1] -= resB[j2] * sA[(i + j2) * NB + (i + j1)];
+
+                        resB[j1] *= sA[(i + j1) * NB + (i + j1)];
+                        sB[tx + NB * (i + j1)] = resB[j1];
+                    }
                 }
+                if(i > maxColA)
+                    break;
             }
-            if(i < 0)
-                break;
         }
-    }
-    else if(LOWER)
-    {
-        int i = maxColA;
-        for(int idx = 0; idx < num_step_sizes; idx++)
+        else if(!LOWER && transA == rocblas_operation_none)
         {
-            const int step_size = step_sizes[idx];
-            for(; i >= (step_size - 1); i -= step_size)
+            int i = maxColA;
+            for(int idx = 0; idx < num_step_sizes; idx++)
             {
-                for(int j = 0; j < step_size; j++)
-                    resB[j] = sB[tx + NB * (i - j)];
-
-                for(int j1 = maxColA; j1 > i; j1--)
+                const int step_size = step_sizes[idx];
+                for(; i >= (step_size - 1); i -= step_size)
                 {
-                    rocblas_int col_off = j1;
-                    T           sB_reg  = sB[tx + NB * j1];
-                    for(int j2 = 0; j2 < step_size; j2++)
-                        resB[j2] -= sB_reg * sA[(i - j2) * NB + j1];
-                }
+                    for(int j = 0; j < step_size; j++)
+                        resB[j] = sB[tx + NB * (i - j)];
 
-                for(int j1 = 0; j1 < step_size; j1++)
-                {
-                    for(int j2 = 0; j2 < j1; j2++)
-                        resB[j1] -= resB[j2] * sA[(i - j2) + NB * (i - j1)];
+                    for(int j1 = maxColA; j1 > i; j1--)
+                    {
+                        rocblas_int col_off = j1;
+                        T           sB_reg  = sB[tx + NB * j1];
+                        for(int j2 = 0; j2 < step_size; j2++)
+                            resB[j2] -= sB_reg * sA[(col_off * NB + (i - j2))];
+                    }
 
-                    resB[j1] *= sA[(i - j1) + NB * (i - j1)];
-                    sB[tx + NB * (i - j1)] = resB[j1];
+                    for(int j1 = 0; j1 < step_size; j1++)
+                    {
+                        for(int j2 = 0; j2 < j1; j2++)
+                            resB[j1] -= resB[j2] * sA[(i - j1) + NB * (i - j2)];
+
+                        resB[j1] *= sA[(i - j1) + NB * (i - j1)];
+                        sB[tx + NB * (i - j1)] = resB[j1];
+                    }
                 }
+                if(i < 0)
+                    break;
             }
-            if(i < 0)
-                break;
         }
-    }
-    else if(!LOWER)
-    {
-        int i = 0;
-        for(int idx = 0; idx < num_step_sizes; idx++)
+        else if(LOWER)
         {
-            const int step_size = step_sizes[idx];
-            for(; i + (step_size - 1) <= maxColA; i += step_size)
+            int i = maxColA;
+            for(int idx = 0; idx < num_step_sizes; idx++)
             {
-                // Subtract previously solved parts
-                for(int j = 0; j < step_size; j++)
-                    resB[j] = sB[tx + NB * (i + j)];
-
-                for(int j1 = 0; j1 < i; j1++)
+                const int step_size = step_sizes[idx];
+                for(; i >= (step_size - 1); i -= step_size)
                 {
-                    T sB_reg = sB[tx + NB * j1];
-                    for(int j2 = 0; j2 < step_size; j2++)
-                        resB[j2] -= sB_reg * sA[(i + j2) * NB + j1];
-                }
+                    for(int j = 0; j < step_size; j++)
+                        resB[j] = sB[tx + NB * (i - j)];
 
-                for(int j1 = 0; j1 < step_size; j1++)
-                {
-                    for(int j2 = 0; j2 < j1; j2++)
-                        resB[j1] -= resB[j2] * sA[(i + j1) * NB + (i + j2)];
+                    for(int j1 = maxColA; j1 > i; j1--)
+                    {
+                        rocblas_int col_off = j1;
+                        T           sB_reg  = sB[tx + NB * j1];
+                        for(int j2 = 0; j2 < step_size; j2++)
+                            resB[j2] -= sB_reg * sA[(i - j2) * NB + j1];
+                    }
 
-                    resB[j1] *= sA[(i + j1) * NB + (i + j1)];
-                    sB[tx + NB * (i + j1)] = resB[j1];
+                    for(int j1 = 0; j1 < step_size; j1++)
+                    {
+                        for(int j2 = 0; j2 < j1; j2++)
+                            resB[j1] -= resB[j2] * sA[(i - j2) + NB * (i - j1)];
+
+                        resB[j1] *= sA[(i - j1) + NB * (i - j1)];
+                        sB[tx + NB * (i - j1)] = resB[j1];
+                    }
                 }
+                if(i < 0)
+                    break;
             }
-            if(i > maxColA)
-                break;
         }
-    }
+        else if(!LOWER)
+        {
+            int i = 0;
+            for(int idx = 0; idx < num_step_sizes; idx++)
+            {
+                const int step_size = step_sizes[idx];
+                for(; i + (step_size - 1) <= maxColA; i += step_size)
+                {
+                    // Subtract previously solved parts
+                    for(int j = 0; j < step_size; j++)
+                        resB[j] = sB[tx + NB * (i + j)];
 
-    __syncthreads();
+                    for(int j1 = 0; j1 < i; j1++)
+                    {
+                        T sB_reg = sB[tx + NB * j1];
+                        for(int j2 = 0; j2 < step_size; j2++)
+                            resB[j2] -= sB_reg * sA[(i + j2) * NB + j1];
+                    }
 
-    // Save shared memory back into B
-    if(tx < maxColB)
-    {
-        for(int i = 0; i <= maxColA; i++)
-            B[i + tx * size_t(ldb)] = sB[i * NB + tx];
+                    for(int j1 = 0; j1 < step_size; j1++)
+                    {
+                        for(int j2 = 0; j2 < j1; j2++)
+                            resB[j1] -= resB[j2] * sA[(i + j1) * NB + (i + j2)];
+
+                        resB[j1] *= sA[(i + j1) * NB + (i + j1)];
+                        sB[tx + NB * (i + j1)] = resB[j1];
+                    }
+                }
+                if(i > maxColA)
+                    break;
+            }
+        }
+
+        __syncthreads();
+
+        // Save shared memory back into B
+        if(tx < maxColB)
+        {
+            for(int i = 0; i <= maxColA; i++)
+                B[i + tx * size_t(ldb)] = sB[i * NB + tx];
+        }
+
+#if DEVICE_GRID_YZ_16BIT
     }
+#endif
 }
 
 /*
@@ -2791,106 +2876,120 @@ rocblas_trsm_small_64_left_device(rocblas_fill      uplo,
                                   BTYPE             Ba,
                                   rocblas_stride    offset_B,
                                   int               ldb,
-                                  rocblas_stride    stride_B)
+                                  rocblas_stride    stride_B,
+                                  int               batch_count)
 {
-    const int batchid = blockIdx.y;
-    auto      A       = load_ptr_batch(Aa, batchid, offset_A, stride_A);
-    auto      B       = load_ptr_batch(Ba, batchid, offset_B, stride_B);
-    auto      alpha   = load_scalar(alpha_dev_host);
+    auto alpha = load_scalar(alpha_dev_host);
 
-    bool      LOWER = uplo == rocblas_fill_lower;
-    bool      CONJ  = transA == rocblas_operation_conjugate_transpose;
-    const int tx    = threadIdx.x;
-    const int bx    = blockIdx.x;
+    uint32_t batchid = blockIdx.z;
 
-    // max A column to read from
-    int maxColA = NB - 1 > m - 1 ? m - 1 : NB - 1;
-    // NB columns, unless last block, then do leftover
-    const int maxColB = (bx < gridDim.x - 1) ? NB : n - bx * NB;
-
-    // offset B into correct block column
-    B += bx * NB * size_t(ldb);
-
-    // shared B
-    __shared__ T sB[NB * NB];
-    if(tx <= maxColA)
+#if DEVICE_GRID_YZ_16BIT
+    for(; batchid < batch_count; batchid += c_YZ_grid_launch_limit)
     {
-        // Load B into sB and multiply by alpha
-        for(int i = 0; i < maxColB; i++)
-            sB[i * NB + tx] = alpha * B[i * size_t(ldb) + tx];
-    }
-    __syncthreads();
+#endif
 
-    // Solve for B in shared memory
-    if(LOWER && transA == rocblas_operation_none)
-    {
-        // Note: I didn't find that using 4 registers (as in the above function) to be noticeably faster in this version
-        for(int i = 0; i <= maxColA; i++)
+        auto A = load_ptr_batch(Aa, batchid, offset_A, stride_A);
+        auto B = load_ptr_batch(Ba, batchid, offset_B, stride_B);
+
+        bool      LOWER = uplo == rocblas_fill_lower;
+        bool      CONJ  = transA == rocblas_operation_conjugate_transpose;
+        const int tx    = threadIdx.x;
+        const int bx    = blockIdx.x;
+
+        // max A column to read from
+        int maxColA = NB - 1 > m - 1 ? m - 1 : NB - 1;
+        // NB columns, unless last block, then do leftover
+        const int maxColB = (bx < gridDim.x - 1) ? NB : n - bx * NB;
+
+        // offset B into correct block column
+        B += bx * NB * size_t(ldb);
+
+        // shared B
+        __shared__ T sB[NB * NB];
+        if(tx <= maxColA)
         {
-            // Subtract previously solved parts
-            for(int j = 0; j < i; j++)
-            {
-                T valA = A[j * size_t(lda) + i];
-                sB[tx * NB + i] -= sB[tx * NB + j] * valA;
-            }
-            if(diag != rocblas_diagonal_unit)
-                sB[tx * NB + i] /= A[i * size_t(lda) + i];
+            // Load B into sB and multiply by alpha
+            for(int i = 0; i < maxColB; i++)
+                sB[i * NB + tx] = alpha * B[i * size_t(ldb) + tx];
         }
-    }
-    else if(!LOWER && transA == rocblas_operation_none)
-    {
-        for(int i = maxColA; i >= 0; i--)
-        {
-            T temp_reg_B = sB[tx * NB + i];
-            for(int j = maxColA; j > i; j--)
-            {
-                T valA = A[j * size_t(lda) + i];
-                temp_reg_B -= sB[tx * NB + j] * valA;
-            }
-            sB[tx * NB + i] = temp_reg_B;
-            if(diag != rocblas_diagonal_unit)
-                sB[tx * NB + i] /= A[i * size_t(lda) + i];
-        }
-    }
-    else if(LOWER)
-    {
-        for(int i = maxColA; i >= 0; i--)
-        {
-            T temp_reg_B = sB[tx * NB + i];
-            for(int j = maxColA; j > i; j--)
-            {
-                T valA = (CONJ) ? conj(A[i * size_t(lda) + j]) : A[i * size_t(lda) + j];
-                temp_reg_B -= sB[tx * NB + j] * valA;
-            }
-            sB[tx * NB + i] = temp_reg_B;
-            if(diag != rocblas_diagonal_unit)
-                sB[tx * NB + i] /= (CONJ) ? conj(A[i * size_t(lda) + i]) : A[i * size_t(lda) + i];
-        }
-    }
-    else if(!LOWER)
-    {
-        for(int i = 0; i <= maxColA; i++)
-        {
-            T temp_reg_B = sB[tx * NB + i];
-            for(int j = 0; j < i; j++)
-            {
-                T valA = (CONJ) ? conj(A[i * size_t(lda) + j]) : A[i * size_t(lda) + j];
-                temp_reg_B -= sB[tx * NB + j] * valA;
-            }
-            sB[tx * NB + i] = temp_reg_B;
-            if(diag != rocblas_diagonal_unit)
-                sB[tx * NB + i] /= (CONJ) ? conj(A[i * size_t(lda) + i]) : A[i * size_t(lda) + i];
-        }
-    }
+        __syncthreads();
 
-    __syncthreads();
+        // Solve for B in shared memory
+        if(LOWER && transA == rocblas_operation_none)
+        {
+            // Note: I didn't find that using 4 registers (as in the above function) to be noticeably faster in this version
+            for(int i = 0; i <= maxColA; i++)
+            {
+                // Subtract previously solved parts
+                for(int j = 0; j < i; j++)
+                {
+                    T valA = A[j * size_t(lda) + i];
+                    sB[tx * NB + i] -= sB[tx * NB + j] * valA;
+                }
+                if(diag != rocblas_diagonal_unit)
+                    sB[tx * NB + i] /= A[i * size_t(lda) + i];
+            }
+        }
+        else if(!LOWER && transA == rocblas_operation_none)
+        {
+            for(int i = maxColA; i >= 0; i--)
+            {
+                T temp_reg_B = sB[tx * NB + i];
+                for(int j = maxColA; j > i; j--)
+                {
+                    T valA = A[j * size_t(lda) + i];
+                    temp_reg_B -= sB[tx * NB + j] * valA;
+                }
+                sB[tx * NB + i] = temp_reg_B;
+                if(diag != rocblas_diagonal_unit)
+                    sB[tx * NB + i] /= A[i * size_t(lda) + i];
+            }
+        }
+        else if(LOWER)
+        {
+            for(int i = maxColA; i >= 0; i--)
+            {
+                T temp_reg_B = sB[tx * NB + i];
+                for(int j = maxColA; j > i; j--)
+                {
+                    T valA = (CONJ) ? conj(A[i * size_t(lda) + j]) : A[i * size_t(lda) + j];
+                    temp_reg_B -= sB[tx * NB + j] * valA;
+                }
+                sB[tx * NB + i] = temp_reg_B;
+                if(diag != rocblas_diagonal_unit)
+                    sB[tx * NB + i]
+                        /= (CONJ) ? conj(A[i * size_t(lda) + i]) : A[i * size_t(lda) + i];
+            }
+        }
+        else if(!LOWER)
+        {
+            for(int i = 0; i <= maxColA; i++)
+            {
+                T temp_reg_B = sB[tx * NB + i];
+                for(int j = 0; j < i; j++)
+                {
+                    T valA = (CONJ) ? conj(A[i * size_t(lda) + j]) : A[i * size_t(lda) + j];
+                    temp_reg_B -= sB[tx * NB + j] * valA;
+                }
+                sB[tx * NB + i] = temp_reg_B;
+                if(diag != rocblas_diagonal_unit)
+                    sB[tx * NB + i]
+                        /= (CONJ) ? conj(A[i * size_t(lda) + i]) : A[i * size_t(lda) + i];
+            }
+        }
 
-    // Save shared memory back into B
-    if(tx < m)
-    {
-        for(int i = 0; i < maxColB; i++)
-            B[i * size_t(ldb) + tx] = sB[i * NB + tx];
+        __syncthreads();
+
+        // Save shared memory back into B
+        if(tx < m)
+        {
+            for(int i = 0; i < maxColB; i++)
+                B[i * size_t(ldb) + tx] = sB[i * NB + tx];
+        }
+
+#if DEVICE_GRID_YZ_16BIT
     }
+#endif
 }
 
 /* T = float, double, etc.
@@ -2925,21 +3024,23 @@ rocblas_status rocblas_trsm_small(rocblas_handle    handle,
                                   rocblas_stride    stride_B,
                                   rocblas_int       batch_count)
 {
+    hipStream_t rocblas_stream = handle->get_stream();
+    int         batches        = handle->getBatchGridDim((int)batch_count);
+
     // threadIdx.x = NB >= m
-    dim3 threads(NB, 1, 1);
+    dim3 threads(NB);
 
     // blockIdx.x = divide B's columns into NB sized blocks
     // blockIdx.y = batch_count
-#define TRSM_SMALL_KERNEL_PARAM                                                                 \
-    grid, threads, 0, handle->get_stream(), uplo, transA, diag, m, n, alpha, dA, offset_A, lda, \
-        stride_A, dB, offset_B, ldb, stride_B
+#define TRSM_SMALL_KERNEL_PARAM                                                           \
+    grid, threads, 0, rocblas_stream, uplo, transA, diag, m, n, alpha, dA, offset_A, lda, \
+        stride_A, dB, offset_B, ldb, stride_B, batch_count
     if(side == rocblas_side_left)
     {
-        dim3 grid((n - 1) / NB + 1, batch_count);
+        dim3 grid((n - 1) / NB + 1, 1, batches);
         if(transA == rocblas_operation_none)
         {
-            constexpr bool TRANSA = false;
-            constexpr bool CONJ   = false;
+            constexpr bool CONJ = false;
             if(uplo == rocblas_fill_upper)
             {
                 constexpr bool LOWER = false;
@@ -2947,8 +3048,6 @@ rocblas_status rocblas_trsm_small(rocblas_handle    handle,
                     ROCBLAS_LAUNCH_KERNEL_GRID(grid,
                                                (rocblas_trsm_small_left_device_sharedB<NB,
                                                                                        STEP_SIZE,
-                                                                                       CONJ,
-                                                                                       TRANSA,
                                                                                        LOWER,
                                                                                        T,
                                                                                        SCAL,
@@ -2959,8 +3058,6 @@ rocblas_status rocblas_trsm_small(rocblas_handle    handle,
                     ROCBLAS_LAUNCH_KERNEL_GRID(grid,
                                                (rocblas_trsm_small_left_device<NB,
                                                                                STEP_SIZE,
-                                                                               CONJ,
-                                                                               TRANSA,
                                                                                LOWER,
                                                                                T,
                                                                                SCAL,
@@ -2975,8 +3072,6 @@ rocblas_status rocblas_trsm_small(rocblas_handle    handle,
                     ROCBLAS_LAUNCH_KERNEL_GRID(grid,
                                                (rocblas_trsm_small_left_device_sharedB<NB,
                                                                                        STEP_SIZE,
-                                                                                       CONJ,
-                                                                                       TRANSA,
                                                                                        LOWER,
                                                                                        T,
                                                                                        SCAL,
@@ -2987,8 +3082,6 @@ rocblas_status rocblas_trsm_small(rocblas_handle    handle,
                     ROCBLAS_LAUNCH_KERNEL_GRID(grid,
                                                (rocblas_trsm_small_left_device<NB,
                                                                                STEP_SIZE,
-                                                                               CONJ,
-                                                                               TRANSA,
                                                                                LOWER,
                                                                                T,
                                                                                SCAL,
@@ -2997,10 +3090,9 @@ rocblas_status rocblas_trsm_small(rocblas_handle    handle,
                                                TRSM_SMALL_KERNEL_PARAM);
             }
         }
-        else if(transA == rocblas_operation_transpose)
+        else if(transA == rocblas_operation_transpose
+                || transA == rocblas_operation_conjugate_transpose)
         {
-            constexpr bool TRANSA = true;
-            constexpr bool CONJ   = false;
             if(uplo == rocblas_fill_upper)
             {
                 constexpr bool LOWER = false;
@@ -3008,8 +3100,6 @@ rocblas_status rocblas_trsm_small(rocblas_handle    handle,
                     ROCBLAS_LAUNCH_KERNEL_GRID(grid,
                                                (rocblas_trsm_small_left_device_sharedB<NB,
                                                                                        STEP_SIZE,
-                                                                                       CONJ,
-                                                                                       TRANSA,
                                                                                        LOWER,
                                                                                        T,
                                                                                        SCAL,
@@ -3020,8 +3110,6 @@ rocblas_status rocblas_trsm_small(rocblas_handle    handle,
                     ROCBLAS_LAUNCH_KERNEL_GRID(grid,
                                                (rocblas_trsm_small_left_device<NB,
                                                                                STEP_SIZE,
-                                                                               CONJ,
-                                                                               TRANSA,
                                                                                LOWER,
                                                                                T,
                                                                                SCAL,
@@ -3036,8 +3124,6 @@ rocblas_status rocblas_trsm_small(rocblas_handle    handle,
                     ROCBLAS_LAUNCH_KERNEL_GRID(grid,
                                                (rocblas_trsm_small_left_device_sharedB<NB,
                                                                                        STEP_SIZE,
-                                                                                       CONJ,
-                                                                                       TRANSA,
                                                                                        LOWER,
                                                                                        T,
                                                                                        SCAL,
@@ -3048,69 +3134,6 @@ rocblas_status rocblas_trsm_small(rocblas_handle    handle,
                     ROCBLAS_LAUNCH_KERNEL_GRID(grid,
                                                (rocblas_trsm_small_left_device<NB,
                                                                                STEP_SIZE,
-                                                                               CONJ,
-                                                                               TRANSA,
-                                                                               LOWER,
-                                                                               T,
-                                                                               SCAL,
-                                                                               ATYPE,
-                                                                               BTYPE>),
-                                               TRSM_SMALL_KERNEL_PARAM);
-            }
-        }
-        else if(transA == rocblas_operation_conjugate_transpose)
-        {
-            constexpr bool TRANSA = true;
-            constexpr bool CONJ   = true;
-            if(uplo == rocblas_fill_upper)
-            {
-                constexpr bool LOWER = false;
-                if(n > 2 * NB && m > 16)
-                    ROCBLAS_LAUNCH_KERNEL_GRID(grid,
-                                               (rocblas_trsm_small_left_device_sharedB<NB,
-                                                                                       STEP_SIZE,
-                                                                                       CONJ,
-                                                                                       TRANSA,
-                                                                                       LOWER,
-                                                                                       T,
-                                                                                       SCAL,
-                                                                                       ATYPE,
-                                                                                       BTYPE>),
-                                               TRSM_SMALL_KERNEL_PARAM);
-                else
-                    ROCBLAS_LAUNCH_KERNEL_GRID(grid,
-                                               (rocblas_trsm_small_left_device<NB,
-                                                                               STEP_SIZE,
-                                                                               CONJ,
-                                                                               TRANSA,
-                                                                               LOWER,
-                                                                               T,
-                                                                               SCAL,
-                                                                               ATYPE,
-                                                                               BTYPE>),
-                                               TRSM_SMALL_KERNEL_PARAM);
-            }
-            else
-            {
-                constexpr bool LOWER = true;
-                if(n > 2 * NB && m > 8)
-                    ROCBLAS_LAUNCH_KERNEL_GRID(grid,
-                                               (rocblas_trsm_small_left_device_sharedB<NB,
-                                                                                       STEP_SIZE,
-                                                                                       CONJ,
-                                                                                       TRANSA,
-                                                                                       LOWER,
-                                                                                       T,
-                                                                                       SCAL,
-                                                                                       ATYPE,
-                                                                                       BTYPE>),
-                                               TRSM_SMALL_KERNEL_PARAM);
-                else
-                    ROCBLAS_LAUNCH_KERNEL_GRID(grid,
-                                               (rocblas_trsm_small_left_device<NB,
-                                                                               STEP_SIZE,
-                                                                               CONJ,
-                                                                               TRANSA,
                                                                                LOWER,
                                                                                T,
                                                                                SCAL,
@@ -3122,7 +3145,7 @@ rocblas_status rocblas_trsm_small(rocblas_handle    handle,
     }
     else
     {
-        dim3 grid((m - 1) / NB + 1, batch_count);
+        dim3 grid((m - 1) / NB + 1, 1, batches);
         ROCBLAS_LAUNCH_KERNEL_GRID(grid,
                                    (rocblas_trsm_small_right_device<T, SCAL, ATYPE, BTYPE, NB>),
                                    TRSM_SMALL_KERNEL_PARAM);
@@ -3138,68 +3161,114 @@ template <typename T,
           typename BTYPE,
           bool TRANSA,
           bool TRANSB,
-          bool CONJ,
           bool UNIT>
-ROCBLAS_KERNEL_NO_BOUNDS rocblas_trsm_block_backward_substitution(int64_t        m,
-                                                                  int64_t        n,
-                                                                  SCAL           alpha_dev_host,
-                                                                  ATYPE          Aa,
-                                                                  rocblas_stride offset_A,
-                                                                  int64_t        lda,
-                                                                  rocblas_stride stride_A,
-                                                                  BTYPE          Ba,
-                                                                  rocblas_stride offset_B,
-                                                                  int64_t        ldb,
-                                                                  rocblas_stride stride_B)
+ROCBLAS_KERNEL_NO_BOUNDS rocblas_trsm_block_backward_substitution(rocblas_operation transA,
+                                                                  int64_t           m,
+                                                                  int64_t           n,
+                                                                  SCAL              alpha_dev_host,
+                                                                  ATYPE             Aa,
+                                                                  rocblas_stride    offset_A,
+                                                                  int64_t           lda,
+                                                                  rocblas_stride    stride_A,
+                                                                  BTYPE             Ba,
+                                                                  rocblas_stride    offset_B,
+                                                                  int64_t           ldb,
+                                                                  rocblas_stride    stride_B,
+                                                                  int               batch_count,
+                                                                  const bool shared_mem_A = false)
 {
-    const int batchid = blockIdx.z;
-    auto      A       = load_ptr_batch(Aa, batchid, offset_A, stride_A);
-    auto      B       = load_ptr_batch(Ba, batchid, offset_B, stride_B);
-    auto      alpha   = load_scalar(alpha_dev_host);
+    const bool CONJ  = transA == rocblas_operation_conjugate_transpose;
+    auto       alpha = load_scalar(alpha_dev_host);
 
-    const int64_t lda_norm  = TRANSA ? lda : 1;
-    const int64_t lda_trans = TRANSA ? 1 : lda;
-    const int64_t ldb_norm  = TRANSB ? ldb : 1;
-    const int64_t ldb_trans = TRANSB ? 1 : ldb;
+    uint32_t batchid = blockIdx.z;
 
-    const int     tx   = threadIdx.x;
-    const int     ty   = threadIdx.y;
-    const int64_t offY = blockIdx.y * blockDim.y + threadIdx.y;
-
-    // passing as extern shared memory to avoid templating NB size
-    // casting fails when going from double -> double complex and otherwise
-    extern __shared__ rocblas_double_complex smem[];
-    T*                                       sB = reinterpret_cast<T*>(smem);
-
-    if(offY < n && tx < m)
+#if DEVICE_GRID_YZ_16BIT
+    for(; batchid < batch_count; batchid += c_YZ_grid_launch_limit)
     {
-        T valB = alpha * B[offY * size_t(ldb_norm) + tx * size_t(ldb_trans)];
-        for(int64_t i = m - 1; i > 0; i--)
+#endif
+        auto A = load_ptr_batch(Aa, batchid, offset_A, stride_A);
+        auto B = load_ptr_batch(Ba, batchid, offset_B, stride_B);
+
+        int64_t       lda_norm  = TRANSA ? lda : 1;
+        int64_t       lda_trans = TRANSA ? 1 : lda;
+        const int64_t ldb_norm  = TRANSB ? ldb : 1;
+        const int64_t ldb_trans = TRANSB ? 1 : ldb;
+
+        const int     tx   = threadIdx.x;
+        const int     ty   = threadIdx.y;
+        const int64_t offY = blockIdx.y * blockDim.y + threadIdx.y;
+
+        // passing as extern shared memory to avoid templating NB size
+        // casting fails when going from double -> double complex and otherwise
+        extern __shared__ rocblas_double_complex smem[];
+        T*                                       sB = reinterpret_cast<T*>(smem);
+        T*                                       sA;
+        const T*                                 A_shared_or_global = A;
+
+        if(shared_mem_A)
         {
-            // tx is row of B, ty is col of B
-            // tx is row of A, i is col of A
-            __syncthreads();
-            if(tx == i)
+            sA = reinterpret_cast<T*>(smem) + blockDim.y;
+            for(int rowOff = 0; rowOff < m; rowOff += blockDim.y)
             {
-                // solve cur row
-                valB   = UNIT ? valB : valB / A[tx * size_t(lda_norm) + tx * size_t(lda_trans)];
-                sB[ty] = valB;
+                int aRow = tx;
+                int aCol = ty + (rowOff);
+                if(aRow < m && aCol < m && aRow < aCol)
+                    sA[aCol * blockDim.x + aRow] = A[aCol * lda_norm + aRow * lda_trans];
+                else if(aRow == aCol && aRow < m && !UNIT)
+                    sA[aCol * blockDim.x + aRow] = 1.0 / A[aCol * lda_norm + aRow * lda_trans];
             }
-
-            __syncthreads();
-
-            if(tx < i)
-                valB -= (CONJ ? conj(A[i * size_t(lda_norm) + tx * size_t(lda_trans)])
-                              : A[i * size_t(lda_norm) + tx * size_t(lda_trans)])
-                        * sB[ty];
+            A_shared_or_global = sA;
+            lda_norm           = blockDim.x;
+            lda_trans          = 1;
         }
 
-        if(!UNIT && tx == 0)
-            valB /= A[tx * size_t(lda_norm) + tx * size_t(lda_trans)];
+        if(offY < n && tx < m)
+        {
+            T valB = alpha * B[offY * size_t(ldb_norm) + tx * size_t(ldb_trans)];
+            for(int64_t i = m - 1; i > 0; i--)
+            {
+                // tx is row of B, ty is col of B
+                // tx is row of A, i is col of A
+                __syncthreads();
+                if(tx == i)
+                {
+                    // solve cur row
+                    if(!UNIT)
+                    {
+                        auto valA = (A_shared_or_global[tx * lda_norm + tx * lda_trans]);
+                        if(!shared_mem_A)
+                            valA = 1.0 / valA;
+                        valB *= valA;
+                    }
 
-        // store back to mem
-        B[offY * size_t(ldb_norm) + tx * size_t(ldb_trans)] = valB;
+                    sB[ty] = valB;
+                }
+
+                __syncthreads();
+
+                if(tx < i)
+                    valB -= (CONJ ? conj(
+                                 A_shared_or_global[i * size_t(lda_norm) + tx * size_t(lda_trans)])
+                                  : A_shared_or_global[i * size_t(lda_norm)
+                                                       + tx * size_t(lda_trans)])
+                            * sB[ty];
+            }
+
+            if(!UNIT && tx == 0)
+            {
+                auto valA = (A_shared_or_global[tx * lda_norm + tx * lda_trans]);
+                if(!shared_mem_A)
+                    valA = 1.0 / valA;
+                valB *= valA;
+            }
+
+            // store back to mem
+            B[offY * size_t(ldb_norm) + tx * size_t(ldb_trans)] = valB;
+        }
+
+#if DEVICE_GRID_YZ_16BIT
     }
+#endif
 }
 
 template <typename T,
@@ -3208,321 +3277,138 @@ template <typename T,
           typename BTYPE,
           bool TRANSA,
           bool TRANSB,
-          bool CONJ,
           bool UNIT>
-ROCBLAS_KERNEL_NO_BOUNDS rocblas_trsm_block_forward_substitution(int64_t        m,
-                                                                 int64_t        n,
-                                                                 SCAL           alpha_dev_host,
-                                                                 ATYPE          Aa,
-                                                                 rocblas_stride offset_A,
-                                                                 int64_t        lda,
-                                                                 rocblas_stride stride_A,
-                                                                 BTYPE          Ba,
-                                                                 rocblas_stride offset_B,
-                                                                 int64_t        ldb,
-                                                                 rocblas_stride stride_B)
+ROCBLAS_KERNEL_NO_BOUNDS rocblas_trsm_block_forward_substitution(rocblas_operation transA,
+                                                                 int64_t           m,
+                                                                 int64_t           n,
+                                                                 SCAL              alpha_dev_host,
+                                                                 ATYPE             Aa,
+                                                                 rocblas_stride    offset_A,
+                                                                 int64_t           lda,
+                                                                 rocblas_stride    stride_A,
+                                                                 BTYPE             Ba,
+                                                                 rocblas_stride    offset_B,
+                                                                 int64_t           ldb,
+                                                                 rocblas_stride    stride_B,
+                                                                 int               batch_count,
+                                                                 const bool shared_mem_A = false)
 {
-    const int64_t lda_norm  = TRANSA ? 1 : lda;
-    const int64_t lda_trans = TRANSA ? lda : 1;
+    const bool CONJ  = transA == rocblas_operation_conjugate_transpose;
+    auto       alpha = load_scalar(alpha_dev_host);
+
+    int64_t       lda_norm  = TRANSA ? 1 : lda;
+    int64_t       lda_trans = TRANSA ? lda : 1;
     const int64_t ldb_norm  = TRANSB ? 1 : ldb;
     const int64_t ldb_trans = TRANSB ? ldb : 1;
 
-    const int batchid = blockIdx.z;
-    auto      A       = load_ptr_batch(Aa, batchid, offset_A, stride_A);
-    auto      B       = load_ptr_batch(Ba, batchid, offset_B, stride_B);
-    auto      alpha   = load_scalar(alpha_dev_host);
+    uint32_t batchid = blockIdx.z;
 
-    const int     tx   = threadIdx.x;
-    const int     ty   = threadIdx.y;
-    const int64_t offY = blockIdx.y * blockDim.y + threadIdx.y;
-
-    extern __shared__ rocblas_double_complex smem[];
-    T*                                       sB = reinterpret_cast<T*>(smem);
-
-    if(offY < n && tx < m)
+#if DEVICE_GRID_YZ_16BIT
+    for(; batchid < batch_count; batchid += c_YZ_grid_launch_limit)
     {
-        T valB = alpha * B[offY * size_t(ldb_norm) + tx * size_t(ldb_trans)];
-        for(int64_t i = 0; i < m - 1; i++)
-        {
-            // tx is row of B, ty is col of B
-            // tx is row of A, i is col of A
-            __syncthreads();
-            if(tx == i)
-            {
-                // solve cur row
-                valB   = UNIT ? valB : valB / A[tx * size_t(lda_norm) + tx * size_t(lda_trans)];
-                sB[ty] = valB;
-            }
-            __syncthreads();
+#endif
+        auto A = load_ptr_batch(Aa, batchid, offset_A, stride_A);
+        auto B = load_ptr_batch(Ba, batchid, offset_B, stride_B);
 
-            if(tx > i)
-                valB -= (CONJ ? conj(A[i * size_t(lda_norm) + tx * size_t(lda_trans)])
-                              : A[i * size_t(lda_norm) + tx * size_t(lda_trans)])
-                        * sB[ty];
+        const int     tx   = threadIdx.x;
+        const int     ty   = threadIdx.y;
+        const int64_t offY = blockIdx.y * blockDim.y + threadIdx.y;
+
+        extern __shared__ rocblas_double_complex smem[];
+        T*                                       sB = reinterpret_cast<T*>(smem);
+        T*                                       sA;
+        const T*                                 A_shared_or_global = A;
+
+        if(shared_mem_A)
+        {
+            sA = reinterpret_cast<T*>(smem) + blockDim.y;
+            for(int rowOff = 0; rowOff < m; rowOff += blockDim.y)
+            {
+                int aRow = tx;
+                int aCol = ty + (rowOff);
+                if(aRow < m && aCol < m && aRow > aCol)
+                    sA[aCol * blockDim.x + aRow] = A[aCol * lda_norm + aRow * lda_trans];
+                else if(aRow == aCol && aRow < m && !UNIT)
+                    sA[aCol * blockDim.x + aRow] = 1.0 / A[aCol * lda_norm + aRow * lda_trans];
+            }
+            A_shared_or_global = sA;
+            lda_norm           = blockDim.x;
+            lda_trans          = 1;
         }
 
-        if(!UNIT && tx == m - 1)
-            valB /= A[tx * size_t(lda_norm) + tx * size_t(lda_trans)];
-
-        // store back to mem
-        B[offY * size_t(ldb_norm) + tx * size_t(ldb_trans)] = valB;
-    }
-}
-
-template <typename T,
-          int DIM_M,
-          int DIM_N,
-          int BLK_M,
-          int BLK_N,
-          int BLK_K,
-          int DIM_M_A,
-          int DIM_N_A,
-          int DIM_M_B,
-          int DIM_N_B,
-          typename TConstPtr,
-          typename TPtr>
-ROCBLAS_KERNEL(DIM_M* DIM_N)
-rocblas_internal_trsm_gemm_kernel(rocblas_operation transA,
-                                  rocblas_operation transB,
-                                  int64_t           M,
-                                  int64_t           N,
-                                  int64_t           K,
-                                  const T           alpha,
-                                  TConstPtr*        dA_input,
-                                  int64_t           lda,
-                                  rocblas_stride    a_st_or_of,
-                                  TConstPtr*        dB_input,
-                                  int64_t           ldb,
-                                  rocblas_stride    b_st_or_of,
-                                  const T           beta,
-                                  TPtr*             dC_input,
-                                  int64_t           ldc,
-                                  rocblas_stride    c_st_or_of,
-                                  rocblas_int       batch_count)
-{
-    int64_t thx  = threadIdx.x; // thread's m position in C
-    int64_t thy  = threadIdx.y; // thread's n position in C
-    int64_t idt  = DIM_M * thy + thx; // thread's number
-    int64_t blx  = blockIdx.x; // block's m position
-    int64_t bly  = blockIdx.y; // block's n position
-    int64_t blz  = blockIdx.z; // block's matrix in the batch
-    int64_t thxA = idt % DIM_M_A; // thread's m position for loading A
-    int64_t thyA = idt / DIM_M_A; // thread's n position for loading A
-    int64_t thxB = idt % DIM_M_B; // thread's m position for loading B
-    int64_t thyB = idt / DIM_M_B; // thread's n position for loading B
-
-    auto* dA = load_ptr_batch(dA_input, blz, a_st_or_of);
-    auto* dB = load_ptr_batch(dB_input, blz, b_st_or_of);
-    auto* dC = load_ptr_batch(dC_input, blz, c_st_or_of);
-
-    __shared__ T sA[BLK_K][BLK_M]; // shared memory for A
-    __shared__ T sB[BLK_N][BLK_K]; // shared memory for B
-    T            rC[BLK_N / DIM_N][BLK_M / DIM_M]; // registers for C
-
-    int64_t a_i_offset = thxA + BLK_M * blx;
-    int64_t a_j_offset = thyA;
-    int64_t b_i_offset = thxB;
-    int64_t b_j_offset = thyB + BLK_N * bly;
-
-    for(int64_t n = 0; n < BLK_N / DIM_N; ++n)
-        for(int64_t m = 0; m < BLK_M / DIM_M; ++m)
-            rC[n][m] = 0.0;
-
-    int64_t kk = 0;
-    for(; kk < K; kk += BLK_K)
-    {
-        for(int64_t n = 0; n < BLK_K; n += DIM_N_A)
+        if(offY < n && tx < m)
         {
-            for(int64_t m = 0; m < BLK_M; m += DIM_M_A)
+            T   valB  = alpha * B[offY * size_t(ldb_norm) + tx * size_t(ldb_trans)];
+            int sAoff = 1;
+            for(int64_t i = 0; i < m - 1; i++)
             {
-                int64_t i = m + a_i_offset;
-                int64_t j = n + kk + a_j_offset;
-                if(i < M && j < K)
+                // tx is row of B, ty is col of B
+                // tx is row of A, i is col of A
+                __syncthreads();
+                if(tx == i)
                 {
-                    if(transA == rocblas_operation_none)
-                        sA[n + thyA][m + thxA] = dA[i + j * size_t(lda)];
-                    else if(transA == rocblas_operation_transpose)
-                        sA[n + thyA][m + thxA] = dA[i * size_t(lda) + j];
-                    else if(transA == rocblas_operation_conjugate_transpose)
-                        sA[n + thyA][m + thxA] = conj(dA[i * size_t(lda) + j]);
+                    // solve cur row
+                    if(!UNIT)
+                    {
+                        auto valA = (A_shared_or_global[tx * lda_norm + tx * lda_trans]);
+                        if(!shared_mem_A)
+                            valA = 1.0 / valA;
+                        valB *= valA;
+                    }
+                    sB[ty] = valB;
                 }
-                else
-                {
-                    sA[n + thyA][m + thxA] = 0.0;
-                }
+                __syncthreads();
+
+                if(tx > i)
+                    valB -= (CONJ ? conj(A_shared_or_global[i * lda_norm + tx * lda_trans])
+                                  : A_shared_or_global[i * lda_norm + tx * lda_trans])
+                            * sB[ty];
             }
+
+            if(!UNIT && tx == m - 1)
+            {
+                auto valA = (A_shared_or_global[tx * lda_norm + tx * lda_trans]);
+                if(!shared_mem_A)
+                    valA = 1.0 / valA;
+                valB *= valA;
+            }
+
+            // store back to mem
+            B[offY * size_t(ldb_norm) + tx * size_t(ldb_trans)] = valB;
         }
 
-        for(int64_t n = 0; n < BLK_N; n += DIM_N_B)
-        {
-            for(int64_t m = 0; m < BLK_K; m += DIM_M_B)
-            {
-                int64_t i = m + kk + b_i_offset;
-                int64_t j = n + b_j_offset;
-                if(i < K && j < N)
-                {
-                    if(transB == rocblas_operation_none)
-                        sB[n + thyB][m + thxB] = dB[i + j * size_t(ldb)];
-                    else if(transB == rocblas_operation_transpose)
-                        sB[n + thyB][m + thxB] = dB[i * size_t(ldb) + j];
-                    else if(transB == rocblas_operation_conjugate_transpose)
-                        sB[n + thyB][m + thxB] = conj(dB[i * size_t(ldb) + j]);
-                }
-                else
-                {
-                    sB[n + thyB][m + thxB] = 0;
-                }
-            }
-        }
-
-        __syncthreads();
-
-        for(int64_t k = 0; k < BLK_K; ++k)
-            for(int64_t n = 0; n < BLK_N / DIM_N; ++n)
-                for(int64_t m = 0; m < BLK_M / DIM_M; ++m)
-                    rC[n][m] += sA[k][m * DIM_M + thx] * sB[n * DIM_N + thy][k];
-
-        __syncthreads();
+#if DEVICE_GRID_YZ_16BIT
     }
-
-    for(int64_t n = 0; n < BLK_N / DIM_N; ++n)
-    {
-        for(int64_t m = 0; m < BLK_M / DIM_M; ++m)
-        {
-            int64_t coord_dCm = blx * BLK_M + m * DIM_M + thx;
-            int64_t coord_dCn = bly * BLK_N + n * DIM_N + thy;
-            if(coord_dCn < N && coord_dCm < M)
-            {
-                dC[coord_dCn * size_t(ldc) + coord_dCm]
-                    = alpha * rC[n][m] + beta * dC[coord_dCn * size_t(ldc) + coord_dCm];
-            }
-        }
-    }
-}
-
-template <bool BATCHED, typename T, typename TScal, typename TConstPtr, typename TPtr>
-rocblas_status rocblas_internal_trsm_gemm_notensile(rocblas_handle    handle,
-                                                    rocblas_operation transA,
-                                                    rocblas_operation transB,
-                                                    int64_t           m,
-                                                    int64_t           n,
-                                                    int64_t           k,
-                                                    TScal             alpha,
-                                                    TConstPtr         dA,
-                                                    rocblas_stride    offset_A,
-                                                    int64_t           lda,
-                                                    rocblas_stride    stride_A,
-                                                    TConstPtr         dB,
-                                                    rocblas_stride    offset_B,
-                                                    int64_t           ldb,
-                                                    rocblas_stride    stride_B,
-                                                    TScal             beta,
-                                                    TPtr              dC,
-                                                    rocblas_stride    offset_C,
-                                                    int64_t           ldc,
-                                                    rocblas_stride    stride_C,
-                                                    int               batch_count)
-{
-    // This is only to be used temporarily with trsm 64-bit problems as Tensile doesn't support
-    // 64-bit input parameters yet.
-    // Don't have to deal with edge-cases with alpha/beta (also alpha/beta are on host)
-
-    // Not making any assumptions on m, n, or k, and not optimizing for specific sizes either as this
-    // is only functional as hopefully Tensile will take this over soon.
-
-    // magic numbers from our full implementation of source kernel gemms
-    const int dim_m = 16;
-    const int dim_n = 16;
-    const int blk_m = 32;
-    const int blk_n = 32;
-    const int blk_k = 8;
-    dim3      dimBlock(dim_m, dim_n, 1);
-    dim3      dimGrid(((m - 1) / blk_m) + 1, ((n - 1) / blk_n) + 1, batch_count);
-
-    rocblas_stride a_st_or_of, b_st_or_of, c_st_or_of;
-    TConstPtr      dA_ptr;
-    TConstPtr      dB_ptr;
-    TPtr           dC_ptr;
-
-    if(BATCHED)
-    {
-        dA_ptr     = dA;
-        dB_ptr     = dB;
-        dC_ptr     = dC;
-        a_st_or_of = offset_A;
-        b_st_or_of = offset_B;
-        c_st_or_of = offset_C;
-    }
-    else
-    {
-        dA_ptr     = dA + offset_A;
-        dB_ptr     = dB + offset_B;
-        dC_ptr     = dC + offset_C;
-        a_st_or_of = stride_A;
-        b_st_or_of = stride_B;
-        c_st_or_of = stride_C;
-    }
-
-    ROCBLAS_LAUNCH_KERNEL((rocblas_internal_trsm_gemm_kernel<T,
-                                                             dim_m,
-                                                             dim_n,
-                                                             blk_m,
-                                                             blk_n,
-                                                             blk_k,
-                                                             blk_m,
-                                                             blk_k,
-                                                             blk_k,
-                                                             blk_n>),
-                          dimGrid,
-                          dimBlock,
-                          0,
-                          handle->get_stream(),
-                          transA,
-                          transB,
-                          m,
-                          n,
-                          k,
-                          *alpha,
-                          dA_ptr,
-                          lda,
-                          a_st_or_of,
-                          dB_ptr,
-                          ldb,
-                          b_st_or_of,
-                          *beta,
-                          dC_ptr,
-                          ldc,
-                          c_st_or_of,
-                          batch_count);
-
-    return rocblas_status_success;
+#endif
 }
 
 template <typename T,
           typename SCAL,
           typename ATYPE,
           typename BTYPE,
-          bool LEFT,
           bool UPPER,
           bool TRANSA,
-          bool CONJ,
           bool UNIT,
           bool BATCHED>
-rocblas_status rocblas_trsm_small_substitution(rocblas_handle handle,
-                                               int64_t        m,
-                                               int64_t        n,
-                                               SCAL           alpha,
-                                               ATYPE          dA,
-                                               rocblas_stride offset_A,
-                                               int64_t        lda,
-                                               rocblas_stride stride_A,
-                                               BTYPE          dB,
-                                               rocblas_stride offset_B,
-                                               int64_t        ldb,
-                                               rocblas_stride stride_B,
-                                               rocblas_int    batch_count,
-                                               rocblas_int    blk_size)
+rocblas_status rocblas_trsm_small_substitution(rocblas_handle    handle,
+                                               rocblas_side      side,
+                                               rocblas_operation transA,
+                                               int64_t           m,
+                                               int64_t           n,
+                                               SCAL              alpha,
+                                               ATYPE             dA,
+                                               rocblas_stride    offset_A,
+                                               int64_t           lda,
+                                               rocblas_stride    stride_A,
+                                               BTYPE             dB,
+                                               rocblas_stride    offset_B,
+                                               int64_t           ldb,
+                                               rocblas_stride    stride_B,
+                                               rocblas_int       batch_count,
+                                               rocblas_int       blk_size)
 {
+    bool LEFT       = side == rocblas_side_left;
+    bool CONJ       = transA == rocblas_operation_conjugate_transpose;
     bool use_64_bit = m > c_i32_max || n > c_i32_max || lda > c_i32_max || ldb > c_i32_max;
 
     constexpr bool TRANSB = (!UPPER && TRANSA) || (UPPER && !TRANSA);
@@ -3532,14 +3418,11 @@ rocblas_status rocblas_trsm_small_substitution(rocblas_handle handle,
 
     rocblas_int blocks = (k - 1) / (1024 / NBX) + 1;
 
-    // for gemms
-    rocblas_operation transA = CONJ     ? rocblas_operation_conjugate_transpose
-                               : TRANSA ? rocblas_operation_transpose
-                                        : rocblas_operation_none;
+    int batches = handle->getBatchGridDim((int)batch_count);
 
     // kernel params for trsm substitution/solve portion
-    dim3 grid(1, blocks, batch_count);
-    dim3 threads(NBX, 1024 / NBX, 1);
+    dim3 grid(1, blocks, batches); // TODO use x grid
+    dim3 threads(NBX, 1024 / NBX);
 
     // for updating B with solved portions
     T       negative_one = -1;
@@ -3549,8 +3432,8 @@ rocblas_status rocblas_trsm_small_substitution(rocblas_handle handle,
     size_t  smem_size;
 
     // Different kernels for forward substitution vs. backward substitution
-    constexpr bool FORWARD_SUB = (LEFT && ((!TRANSA && !UPPER) || (TRANSA && UPPER)))
-                                 || (!LEFT && ((TRANSA && !UPPER) || (!TRANSA && UPPER)));
+    bool FORWARD_SUB = (LEFT && ((!TRANSA && !UPPER) || (TRANSA && UPPER)))
+                       || (!LEFT && ((TRANSA && !UPPER) || (!TRANSA && UPPER)));
     for(j = 0; j < k2 - NBX; j += NBX)
     {
         const int64_t j_next = j + NBX;
@@ -3559,25 +3442,34 @@ rocblas_status rocblas_trsm_small_substitution(rocblas_handle handle,
                                 : (!TRANSA ? j + j_next * size_t(lda) : j * size_t(lda) + j_next);
         size_t offB_gemm = LEFT ? j : j * size_t(ldb);
         size_t offC_gemm = LEFT ? j_next : j_next * size_t(ldb);
-        smem_size        = (1024 / NBX) * sizeof(T);
+        smem_size        = ((1024 / NBX) + (NBX * NBX)) * sizeof(T);
+
+        int  max_mem     = handle->getMaxSharedMemPerBlock();
+        bool sharedA_mem = (max_mem >= smem_size);
+        if(!sharedA_mem)
+        {
+            // fallback to no shared mem for A matrix
+            smem_size = (1024 / NBX) * sizeof(T);
+        }
 
         // 1. call trsm subtitution/solve
         if(FORWARD_SUB)
         {
             offA_sub = j * size_t(lda) + j;
             offB_sub = LEFT ? j : j * size_t(ldb);
+
             ROCBLAS_LAUNCH_KERNEL((rocblas_trsm_block_forward_substitution<T,
                                                                            SCAL,
                                                                            ATYPE,
                                                                            BTYPE,
                                                                            UPPER,
                                                                            TRANSB,
-                                                                           CONJ,
                                                                            UNIT>),
                                   grid,
                                   threads,
                                   smem_size,
                                   handle->get_stream(),
+                                  transA,
                                   NBX,
                                   k,
                                   j == 0 ? alpha : 1,
@@ -3588,7 +3480,9 @@ rocblas_status rocblas_trsm_small_substitution(rocblas_handle handle,
                                   dB,
                                   offset_B + offB_sub,
                                   ldb,
-                                  stride_B);
+                                  stride_B,
+                                  batch_count,
+                                  sharedA_mem);
         }
         else
         {
@@ -3605,12 +3499,12 @@ rocblas_status rocblas_trsm_small_substitution(rocblas_handle handle,
                                                                             BTYPE,
                                                                             UPPER,
                                                                             TRANSB,
-                                                                            CONJ,
                                                                             UNIT>),
                                   grid,
                                   threads,
                                   smem_size,
                                   handle->get_stream(),
+                                  transA,
                                   NBX,
                                   k,
                                   j == 0 ? alpha : 1,
@@ -3621,12 +3515,15 @@ rocblas_status rocblas_trsm_small_substitution(rocblas_handle handle,
                                   dB,
                                   offset_B + offB_sub,
                                   ldb,
-                                  stride_B);
+                                  stride_B,
+                                  batch_count,
+                                  sharedA_mem);
         }
 
         // 2. call gemm to update B matrix
         if(use_64_bit)
-            rocblas_internal_trsm_gemm_notensile<BATCHED, T>(
+        {
+            RETURN_IF_ROCBLAS_ERROR(rocblas_internal_gemm_64<BATCHED>(
                 handle,
                 LEFT ? transA : rocblas_operation_none,
                 LEFT ? rocblas_operation_none : transA,
@@ -3647,94 +3544,99 @@ rocblas_status rocblas_trsm_small_substitution(rocblas_handle handle,
                 offset_B + offC_gemm,
                 ldb,
                 stride_B,
-                batch_count);
+                batch_count));
+        }
         else
-            rocblas_internal_gemm_template<BATCHED>(
-                handle,
-                LEFT ? transA : rocblas_operation_none,
-                LEFT ? rocblas_operation_none : transA,
-                LEFT ? m - j_next : m,
-                LEFT ? n : n - j_next,
-                NBX,
-                &negative_one,
-                LEFT ? dA : (ATYPE)dB,
-                LEFT ? offset_A + offA_gemm : offset_B + offB_gemm,
-                LEFT ? lda : ldb,
-                LEFT ? stride_A : stride_B,
-                LEFT ? (ATYPE)dB : dA,
-                LEFT ? offset_B + offB_gemm : offset_A + offA_gemm,
-                LEFT ? ldb : lda,
-                LEFT ? stride_B : stride_A,
-                j == 0 ? &alpha : &one,
-                dB,
-                offset_B + offC_gemm,
-                ldb,
-                stride_B,
-                batch_count);
+        {
+            RETURN_IF_ROCBLAS_ERROR(
+                rocblas_internal_gemm<BATCHED>(handle,
+                                               LEFT ? transA : rocblas_operation_none,
+                                               LEFT ? rocblas_operation_none : transA,
+                                               LEFT ? m - j_next : m,
+                                               LEFT ? n : n - j_next,
+                                               NBX,
+                                               &negative_one,
+                                               LEFT ? dA : (ATYPE)dB,
+                                               LEFT ? offset_A + offA_gemm : offset_B + offB_gemm,
+                                               LEFT ? lda : ldb,
+                                               LEFT ? stride_A : stride_B,
+                                               LEFT ? (ATYPE)dB : dA,
+                                               LEFT ? offset_B + offB_gemm : offset_A + offA_gemm,
+                                               LEFT ? ldb : lda,
+                                               LEFT ? stride_B : stride_A,
+                                               j == 0 ? &alpha : &one,
+                                               dB,
+                                               offset_B + offC_gemm,
+                                               ldb,
+                                               stride_B,
+                                               batch_count));
+        }
     }
 
     // solve last diagonal
     int64_t leftover = k2 - j;
     blocks           = (k - 1) / (1024 / leftover) + 1;
-    grid             = dim3(1, blocks, batch_count);
-    threads          = dim3(leftover, 1024 / leftover, 1);
-    smem_size        = (1024 / leftover) * sizeof(T);
+    grid             = dim3(1, blocks, batches);
+    threads          = dim3(leftover, 1024 / leftover);
+    smem_size        = ((1024 / leftover) + (leftover * leftover)) * sizeof(T);
 
+    int  max_mem     = handle->getMaxSharedMemPerBlock();
+    bool sharedA_mem = (max_mem >= smem_size);
+    if(!sharedA_mem)
+    {
+        // fallback to no shared mem for A matrix
+        smem_size = (1024 / leftover) * sizeof(T);
+    }
     if(FORWARD_SUB)
     {
         offA_sub = j * size_t(lda) + j;
         offB_sub = LEFT ? j : j * size_t(ldb);
-        ROCBLAS_LAUNCH_KERNEL((rocblas_trsm_block_forward_substitution<T,
-                                                                       SCAL,
-                                                                       ATYPE,
-                                                                       BTYPE,
-                                                                       UPPER,
-                                                                       TRANSB,
-                                                                       CONJ,
-                                                                       UNIT>),
-                              grid,
-                              threads,
-                              smem_size,
-                              handle->get_stream(),
-                              k2 - j,
-                              k,
-                              j == 0 ? alpha : 1,
-                              dA,
-                              offset_A + offA_sub,
-                              lda,
-                              stride_A,
-                              dB,
-                              offset_B + offB_sub,
-                              ldb,
-                              stride_B);
+
+        ROCBLAS_LAUNCH_KERNEL(
+            (rocblas_trsm_block_forward_substitution<T, SCAL, ATYPE, BTYPE, UPPER, TRANSB, UNIT>),
+            grid,
+            threads,
+            smem_size,
+            handle->get_stream(),
+            transA,
+            k2 - j,
+            k,
+            j == 0 ? alpha : 1,
+            dA,
+            offset_A + offA_sub,
+            lda,
+            stride_A,
+            dB,
+            offset_B + offB_sub,
+            ldb,
+            stride_B,
+            batch_count,
+            sharedA_mem);
     }
     else
     {
         offA_sub = LEFT ? 0 : 0;
         offB_sub = LEFT ? 0 : 0;
-        ROCBLAS_LAUNCH_KERNEL((rocblas_trsm_block_backward_substitution<T,
-                                                                        SCAL,
-                                                                        ATYPE,
-                                                                        BTYPE,
-                                                                        UPPER,
-                                                                        TRANSB,
-                                                                        CONJ,
-                                                                        UNIT>),
-                              grid,
-                              threads,
-                              smem_size,
-                              handle->get_stream(),
-                              k2 - j,
-                              k,
-                              j == 0 ? alpha : 1,
-                              dA,
-                              offset_A + offA_sub,
-                              lda,
-                              stride_A,
-                              dB,
-                              offset_B + offB_sub,
-                              ldb,
-                              stride_B);
+        ROCBLAS_LAUNCH_KERNEL(
+            (rocblas_trsm_block_backward_substitution<T, SCAL, ATYPE, BTYPE, UPPER, TRANSB, UNIT>),
+            grid,
+            threads,
+            smem_size,
+            handle->get_stream(),
+            transA,
+            k2 - j,
+            k,
+            j == 0 ? alpha : 1,
+            dA,
+            offset_A + offA_sub,
+            lda,
+            stride_A,
+            dB,
+            offset_B + offB_sub,
+            ldb,
+            stride_B,
+            batch_count,
+            sharedA_mem);
     }
 
     return rocblas_status_success;
@@ -3762,104 +3664,50 @@ rocblas_status rocblas_internal_trsm_small_substitution_launcher(rocblas_handle 
 {
     rocblas_status status = rocblas_status_success;
 
-#define TRSM_SUBSTITUTION_LAUNCH(T, LEFT, UPPER, TRANS, CONJ, DIAG, BATCHED) \
-    status = rocblas_trsm_small_substitution<T,                              \
-                                             T,                              \
-                                             TConstPtr,                      \
-                                             TPtr,                           \
-                                             LEFT,                           \
-                                             UPPER,                          \
-                                             TRANS,                          \
-                                             CONJ,                           \
-                                             DIAG,                           \
-                                             BATCHED>(handle,                \
-                                                      m,                     \
-                                                      n,                     \
-                                                      alpha_h,               \
-                                                      A,                     \
-                                                      offset_A,              \
-                                                      lda,                   \
-                                                      stride_A,              \
-                                                      B,                     \
-                                                      offset_B,              \
-                                                      ldb,                   \
-                                                      stride_B,              \
-                                                      batch_count,           \
-                                                      blksize)
+#define TRSM_SUBSTITUTION_LAUNCH(T, UPPER, TRANS, DIAG, BATCHED)                                  \
+    status = rocblas_trsm_small_substitution<T, T, TConstPtr, TPtr, UPPER, TRANS, DIAG, BATCHED>( \
+        handle,                                                                                   \
+        side,                                                                                     \
+        transA,                                                                                   \
+        m,                                                                                        \
+        n,                                                                                        \
+        alpha_h,                                                                                  \
+        A,                                                                                        \
+        offset_A,                                                                                 \
+        lda,                                                                                      \
+        stride_A,                                                                                 \
+        B,                                                                                        \
+        offset_B,                                                                                 \
+        ldb,                                                                                      \
+        stride_B,                                                                                 \
+        batch_count,                                                                              \
+        blksize)
 
     // A mess of if/else statements to get the template parameters
-    if(side == rocblas_side_right && uplo == rocblas_fill_lower && transA == rocblas_operation_none
+    if(uplo == rocblas_fill_lower && transA == rocblas_operation_none
        && diag == rocblas_diagonal_non_unit)
-        TRSM_SUBSTITUTION_LAUNCH(T, false, false, false, false, false, BATCHED);
-    else if(side == rocblas_side_right && uplo == rocblas_fill_lower
-            && transA == rocblas_operation_none && diag == rocblas_diagonal_unit)
-        TRSM_SUBSTITUTION_LAUNCH(T, false, false, false, false, true, BATCHED);
-    else if(side == rocblas_side_right && uplo == rocblas_fill_lower
-            && transA == rocblas_operation_conjugate_transpose && diag == rocblas_diagonal_non_unit)
-        TRSM_SUBSTITUTION_LAUNCH(T, false, false, true, true, false, BATCHED);
-    else if(side == rocblas_side_right && uplo == rocblas_fill_lower
-            && transA == rocblas_operation_conjugate_transpose && diag == rocblas_diagonal_unit)
-        TRSM_SUBSTITUTION_LAUNCH(T, false, false, true, true, true, BATCHED);
-    else if(side == rocblas_side_right && uplo == rocblas_fill_lower
-            && transA == rocblas_operation_transpose && diag == rocblas_diagonal_non_unit)
-        TRSM_SUBSTITUTION_LAUNCH(T, false, false, true, false, false, BATCHED);
-    else if(side == rocblas_side_right && uplo == rocblas_fill_lower
-            && transA == rocblas_operation_transpose && diag == rocblas_diagonal_unit)
-        TRSM_SUBSTITUTION_LAUNCH(T, false, false, true, false, true, BATCHED);
-    else if(side == rocblas_side_right && uplo == rocblas_fill_upper
-            && transA == rocblas_operation_none && diag == rocblas_diagonal_non_unit)
-        TRSM_SUBSTITUTION_LAUNCH(T, false, true, false, false, false, BATCHED);
-    else if(side == rocblas_side_right && uplo == rocblas_fill_upper
-            && transA == rocblas_operation_none && diag == rocblas_diagonal_unit)
-        TRSM_SUBSTITUTION_LAUNCH(T, false, true, false, false, true, BATCHED);
-    else if(side == rocblas_side_right && uplo == rocblas_fill_upper
-            && transA == rocblas_operation_conjugate_transpose && diag == rocblas_diagonal_non_unit)
-        TRSM_SUBSTITUTION_LAUNCH(T, false, true, true, true, false, BATCHED);
-    else if(side == rocblas_side_right && uplo == rocblas_fill_upper
-            && transA == rocblas_operation_conjugate_transpose && diag == rocblas_diagonal_unit)
-        TRSM_SUBSTITUTION_LAUNCH(T, false, true, true, true, true, BATCHED);
-    else if(side == rocblas_side_right && uplo == rocblas_fill_upper
-            && transA == rocblas_operation_transpose && diag == rocblas_diagonal_non_unit)
-        TRSM_SUBSTITUTION_LAUNCH(T, false, true, true, false, false, BATCHED);
-    else if(side == rocblas_side_right && uplo == rocblas_fill_upper
-            && transA == rocblas_operation_transpose && diag == rocblas_diagonal_unit)
-        TRSM_SUBSTITUTION_LAUNCH(T, false, true, true, false, true, BATCHED);
-    else if(side == rocblas_side_left && uplo == rocblas_fill_lower
-            && transA == rocblas_operation_none && diag == rocblas_diagonal_non_unit)
-        TRSM_SUBSTITUTION_LAUNCH(T, true, false, false, false, false, BATCHED);
-    else if(side == rocblas_side_left && uplo == rocblas_fill_lower
-            && transA == rocblas_operation_none && diag == rocblas_diagonal_unit)
-        TRSM_SUBSTITUTION_LAUNCH(T, true, false, false, false, true, BATCHED);
-    else if(side == rocblas_side_left && uplo == rocblas_fill_lower
-            && transA == rocblas_operation_conjugate_transpose && diag == rocblas_diagonal_non_unit)
-        TRSM_SUBSTITUTION_LAUNCH(T, true, false, true, true, false, BATCHED);
-    else if(side == rocblas_side_left && uplo == rocblas_fill_lower
-            && transA == rocblas_operation_conjugate_transpose && diag == rocblas_diagonal_unit)
-        TRSM_SUBSTITUTION_LAUNCH(T, true, false, true, true, true, BATCHED);
-    else if(side == rocblas_side_left && uplo == rocblas_fill_lower
-            && transA == rocblas_operation_transpose && diag == rocblas_diagonal_non_unit)
-        TRSM_SUBSTITUTION_LAUNCH(T, true, false, true, false, false, BATCHED);
-    else if(side == rocblas_side_left && uplo == rocblas_fill_lower
-            && transA == rocblas_operation_transpose && diag == rocblas_diagonal_unit)
-        TRSM_SUBSTITUTION_LAUNCH(T, true, false, true, false, true, BATCHED);
-    else if(side == rocblas_side_left && uplo == rocblas_fill_upper
-            && transA == rocblas_operation_none && diag == rocblas_diagonal_non_unit)
-        TRSM_SUBSTITUTION_LAUNCH(T, true, true, false, false, false, BATCHED);
-    else if(side == rocblas_side_left && uplo == rocblas_fill_upper
-            && transA == rocblas_operation_none && diag == rocblas_diagonal_unit)
-        TRSM_SUBSTITUTION_LAUNCH(T, true, true, false, false, true, BATCHED);
-    else if(side == rocblas_side_left && uplo == rocblas_fill_upper
-            && transA == rocblas_operation_conjugate_transpose && diag == rocblas_diagonal_non_unit)
-        TRSM_SUBSTITUTION_LAUNCH(T, true, true, true, true, false, BATCHED);
-    else if(side == rocblas_side_left && uplo == rocblas_fill_upper
-            && transA == rocblas_operation_conjugate_transpose && diag == rocblas_diagonal_unit)
-        TRSM_SUBSTITUTION_LAUNCH(T, true, true, true, true, true, BATCHED);
-    else if(side == rocblas_side_left && uplo == rocblas_fill_upper
-            && transA == rocblas_operation_transpose && diag == rocblas_diagonal_non_unit)
-        TRSM_SUBSTITUTION_LAUNCH(T, true, true, true, false, false, BATCHED);
-    else if(side == rocblas_side_left && uplo == rocblas_fill_upper
-            && transA == rocblas_operation_transpose && diag == rocblas_diagonal_unit)
-        TRSM_SUBSTITUTION_LAUNCH(T, true, true, true, false, true, BATCHED);
+        TRSM_SUBSTITUTION_LAUNCH(T, false, false, false, BATCHED);
+    else if(uplo == rocblas_fill_lower && transA == rocblas_operation_none
+            && diag == rocblas_diagonal_unit)
+        TRSM_SUBSTITUTION_LAUNCH(T, false, false, true, BATCHED);
+    else if(uplo == rocblas_fill_lower && transA != rocblas_operation_none
+            && diag == rocblas_diagonal_non_unit)
+        TRSM_SUBSTITUTION_LAUNCH(T, false, true, false, BATCHED);
+    else if(uplo == rocblas_fill_lower && transA != rocblas_operation_none
+            && diag == rocblas_diagonal_unit)
+        TRSM_SUBSTITUTION_LAUNCH(T, false, true, true, BATCHED);
+    else if(uplo == rocblas_fill_upper && transA == rocblas_operation_none
+            && diag == rocblas_diagonal_non_unit)
+        TRSM_SUBSTITUTION_LAUNCH(T, true, false, false, BATCHED);
+    else if(uplo == rocblas_fill_upper && transA == rocblas_operation_none
+            && diag == rocblas_diagonal_unit)
+        TRSM_SUBSTITUTION_LAUNCH(T, true, false, true, BATCHED);
+    else if(uplo == rocblas_fill_upper && transA != rocblas_operation_none
+            && diag == rocblas_diagonal_non_unit)
+        TRSM_SUBSTITUTION_LAUNCH(T, true, true, false, BATCHED);
+    else if(uplo == rocblas_fill_upper && transA != rocblas_operation_none
+            && diag == rocblas_diagonal_unit)
+        TRSM_SUBSTITUTION_LAUNCH(T, true, true, true, BATCHED);
     else
         return rocblas_status_internal_error;
 
@@ -3995,14 +3843,16 @@ rocblas_status rocblas_internal_trsm_launcher(rocblas_handle    handle,
                 {
                     // This function sets kernel parameters and launches the appropriate kernel (with less shared memory) for a double complex trsm problem.
 
+                    int batches = handle->getBatchGridDim((int)batch_count);
+
                     // threadIdx.x = NB >= m
-                    dim3 threads(64, 1, 1);
+                    dim3 threads(64);
 
                     // blockIdx.x = divide B's columns into NB sized blocks
                     // blockIdx.y = batch_count
                     if(side == rocblas_side_left)
                     {
-                        dim3 grid((n + 64 - 1) / 64, batch_count);
+                        dim3 grid((n + 64 - 1) / 64, 1, batches);
                         ROCBLAS_LAUNCH_KERNEL((rocblas_trsm_small_64_left_device<T, T, U, V, 64>),
                                               grid,
                                               threads,
@@ -4021,11 +3871,12 @@ rocblas_status rocblas_internal_trsm_launcher(rocblas_handle    handle,
                                               B,
                                               offset_B,
                                               ldb,
-                                              stride_B);
+                                              stride_B,
+                                              batch_count);
                     }
                     else
                     {
-                        dim3 grid((m + 64 - 1) / 64, batch_count);
+                        dim3 grid((m + 64 - 1) / 64, 1, batches);
                         ROCBLAS_LAUNCH_KERNEL((rocblas_trsm_small_64_right_device<T, T, U, V, 64>),
                                               grid,
                                               threads,
@@ -4044,7 +3895,8 @@ rocblas_status rocblas_internal_trsm_launcher(rocblas_handle    handle,
                                               B,
                                               offset_B,
                                               ldb,
-                                              stride_B);
+                                              stride_B,
+                                              batch_count);
                     }
                 }
                 else
@@ -4244,18 +4096,18 @@ rocblas_status rocblas_internal_trsm_launcher(rocblas_handle    handle,
                 if(status != rocblas_status_success)
                     return status;
 
-                copy_block_unit<T>(handle,
-                                   m,
-                                   n,
-                                   U(BATCHED ? w_x_temparr : w_x_temp),
-                                   m,
-                                   x_temp_els,
-                                   V(B),
-                                   ldb,
-                                   stride_B,
-                                   batch_count,
-                                   0,
-                                   offset_B);
+                rocblas_copy_block_unit<T>(handle,
+                                           m,
+                                           n,
+                                           U(BATCHED ? w_x_temparr : w_x_temp),
+                                           m,
+                                           x_temp_els,
+                                           V(B),
+                                           ldb,
+                                           stride_B,
+                                           batch_count,
+                                           0,
+                                           offset_B);
             }
 
             // If status is successful, return perf_status; else return status

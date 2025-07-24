@@ -14,14 +14,22 @@ Definitions:
 
   - &tiny_matrix_size
     - { N:   199, lda:  199, K:  32,   ldc: 199 }
+    #test the kernels which uses only gemm to compute syrk
+    - { N:   2, lda:  501, K:  501,   ldc: 2 }
 
   - &medium_matrix_size_range
     - { N:   199, lda:  199, K:  32,   ldc: 199 }
     - { N:    88, lda:  200, K:  200,  ldc: 88 }
+    #test the kernels which uses only gemm to compute syrk
+    - { N:    51, lda:  201, K:  201,  ldc: 51 }
+    - { N:    601, lda:  806, K:  805,  ldc: 601 }
 
   - &large_matrix_size_range
     - { N:  2011, lda:  2011, K:  253, ldc: 2048 }
     - { N:  5000, lda:  5008, K:  164, ldc: 5000 }
+    #test the kernels which uses only gemm to compute syrk
+    - { N:  601, lda:  2001, K:  2001, ldc: 601 }
+    - { N:  64, lda:  5000, K:  5000, ldc: 64 }
 
   - &alpha_beta_range
     - { alpha:  1.5, alphai:  1.5, beta:  0.0, betai: 0.0 }
@@ -30,7 +38,7 @@ Definitions:
     - { alpha:  0.0, alphai:  0.0, beta:  2.0, betai: 0.5 } # scale step only
 
   - &alpha_beta
-    - { alpha: -1.0, alphai:  0.3, beta: -0.5, betai: 0.6 }
+    - { alpha: -1.0, alphai:  0.5, beta: -0.5, betai: 0.5 }
     # These larger values below on large_matrices require a tolerance rather than equality
     # due to least significant digit difference CPU to GPU on windows
     # I expect only accumulation difference from scheduling variation on windows
@@ -44,7 +52,7 @@ Tests:
   - syrk_batched_bad_arg
   - syrk_strided_batched_bad_arg
   precision: *single_double_precisions_complex_real
-  api: [ C, FORTRAN ]
+  api: [ C, FORTRAN, FORTRAN_64 ]
 
 # non batched
 
@@ -64,11 +72,11 @@ Tests:
   alpha_beta:
     - { alpha:  0.5, alphai:  0.0, beta:  0.5, betai: 0.0 }
   pointer_mode_host: false
-  gpu_arch: '90a'
+  gpu_arch: ['90a','942']
   os_flags: LINUX
 
 - name: syrk_size_t_N
-  category: nightly #stress
+  category: stress
   function: syrk
   precision: *single_precision
   uplo: [ L, U ]
@@ -83,7 +91,7 @@ Tests:
   alpha_beta:
     - { alpha:  0.5, alphai:  0.0, beta:  0.5, betai: 0.0 }
   pointer_mode_host: false
-  gpu_arch: '90a'
+  gpu_arch: ['90a','942']
   os_flags: LINUX
 
 - name: syrk_quick
@@ -228,6 +236,38 @@ Tests:
   batch_count: [ 2 ]
   pointer_mode_host: false
 
+- name: syrk_large_batch
+  category: stress
+  uplo: [ U, L ]
+  arguments:
+    - { N:  2, K: 2, lda: 2, ldb: 2, ldc: 2, batch_count: *c_grid_yz_require_passes, transA: T}
+  alpha_beta:
+    - { alpha:  1.0, beta:  1.0 }
+  function:
+    - syrk_batched: *single_precision
+    - syrk_strided_batched: *single_precision
+  stride_scale: 1
+
+- name: syrk_64
+  category: stress
+  uplo: [ U, L ]
+  arguments:
+    #- { N:  1, K:  2147483649,  lda:  1, ldb: 1, batch_count: 1, transA: N } #TODO: Commenting out big tests due to alarm time out
+    #- { N:  1, K:  2147483649,  lda: 2147483649, ldc: 1, batch_count: 1, transA: T } #TODO: Commenting out big tests due to alarm time out
+    - { N:  35, K:  2,  lda:  2147483649, ldc: 36, batch_count: 1, transA: N }
+    - { N:  2, K:  35,  lda: 36, ldb: 2147483649, ldc: 2147483649, batch_count: 1, transA: T }
+    - { N:  2, K: 2, lda: 2, ldc: 2, batch_count: *c_grid_yz_require_passes, transA: T}
+    - { N:  2011, K:  253,  lda:  2011, ldc: 2048, batch_count: 3, transA: N }
+    - { N:  1024, K:  1200, lda:  1200, ldc: 1024, batch_count: 2, transA: T }
+  api: [ C_64 ]
+  alpha_beta:
+    - { alpha:  1.0, beta:  1.0 }
+  os_flags: [ LINUX ]
+  function:
+    - syrk_strided_batched: *single_precision
+  stride_scale: 1
+  #gpu_arch: '9??'
+
 - name: syrk_graph_test
   category: pre_checkin
   function:
@@ -261,5 +301,6 @@ Tests:
   alpha_beta: *alpha_beta_range
   batch_count: [ 2 ]
   stride_scale: 1
+  devices: 4
   repeatability_check: true
 ...

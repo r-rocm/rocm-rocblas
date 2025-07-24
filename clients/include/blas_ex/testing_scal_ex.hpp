@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2024 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2018-2025 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -27,9 +27,9 @@
 template <typename Ta, typename Tx = Ta, typename Tex = Tx>
 void testing_scal_ex_bad_arg(const Arguments& arg)
 {
-    auto rocblas_scal_ex_fn = arg.api == FORTRAN ? rocblas_scal_ex_fortran : rocblas_scal_ex;
+    auto rocblas_scal_ex_fn = arg.api & c_API_FORTRAN ? rocblas_scal_ex_fortran : rocblas_scal_ex;
     auto rocblas_scal_ex_fn_64
-        = arg.api == FORTRAN_64 ? rocblas_scal_ex_64_fortran : rocblas_scal_ex_64;
+        = arg.api & c_API_FORTRAN ? rocblas_scal_ex_64_fortran : rocblas_scal_ex_64;
 
     rocblas_datatype alpha_type     = rocblas_type2datatype<Ta>();
     rocblas_datatype x_type         = rocblas_type2datatype<Tx>();
@@ -42,10 +42,7 @@ void testing_scal_ex_bad_arg(const Arguments& arg)
     rocblas_local_handle handle{arg};
 
     // Allocate device memory
-    device_vector<Tx> dx(N, incx);
-
-    // Check device memory allocation
-    CHECK_DEVICE_ALLOCATION(dx.memcheck());
+    DEVICE_MEMCHECK(device_vector<Tx>, dx, (N, incx));
 
     DAPI_EXPECT(rocblas_status_invalid_handle,
                 rocblas_scal_ex_fn,
@@ -74,9 +71,9 @@ void testing_scal_ex_bad_arg(const Arguments& arg)
 template <typename Ta, typename Tx = Ta, typename Tex = Tx>
 void testing_scal_ex(const Arguments& arg)
 {
-    auto rocblas_scal_ex_fn = arg.api == FORTRAN ? rocblas_scal_ex_fortran : rocblas_scal_ex;
+    auto rocblas_scal_ex_fn = arg.api & c_API_FORTRAN ? rocblas_scal_ex_fortran : rocblas_scal_ex;
     auto rocblas_scal_ex_fn_64
-        = arg.api == FORTRAN_64 ? rocblas_scal_ex_64_fortran : rocblas_scal_ex_64;
+        = arg.api & c_API_FORTRAN ? rocblas_scal_ex_64_fortran : rocblas_scal_ex_64;
 
     rocblas_datatype alpha_type     = arg.a_type;
     rocblas_datatype x_type         = arg.b_type;
@@ -99,21 +96,17 @@ void testing_scal_ex(const Arguments& arg)
 
     // Naming: `h` is in CPU (host) memory(eg hx), `d` is in GPU (device) memory (eg dx).
     // Allocate host memory
-    host_vector<Tx> hx(N, incx);
-    host_vector<Tx> hx_gold(N, incx);
-    host_vector<Ta> halpha(1);
+    HOST_MEMCHECK(host_vector<Tx>, hx, (N, incx));
+    HOST_MEMCHECK(host_vector<Tx>, hx_gold, (N, incx));
+    HOST_MEMCHECK(host_vector<Ta>, halpha, (1));
     halpha[0] = h_alpha;
 
     // Initial Data on CPU
     rocblas_init_vector(hx, arg, rocblas_client_alpha_sets_nan, true);
 
     // allocate memory on device
-    device_vector<Tx> dx(N, incx);
-    device_vector<Ta> d_alpha(1);
-
-    // Check device memory allocation
-    CHECK_DEVICE_ALLOCATION(dx.memcheck());
-    CHECK_DEVICE_ALLOCATION(d_alpha.memcheck());
+    DEVICE_MEMCHECK(device_vector<Tx>, dx, (N, incx));
+    DEVICE_MEMCHECK(device_vector<Ta>, d_alpha, (1));
 
     // copy vector is easy in STL; hx_gold = hx: save a copy in hx_gold which will be output of CPU
     // BLAS
@@ -156,18 +149,48 @@ void testing_scal_ex(const Arguments& arg)
 
             if(arg.repeatability_check)
             {
-                host_vector<Tx> hx_copy(N, incx);
-                CHECK_HIP_ERROR(hx_copy.memcheck());
+                HOST_MEMCHECK(host_vector<Tx>, hx_copy, (N, incx));
 
                 CHECK_HIP_ERROR(hx.transfer_from(dx));
-                for(int i = 0; i < arg.iters; i++)
-                {
-                    CHECK_HIP_ERROR(dx.transfer_from(hx_gold));
 
-                    DAPI_CHECK(rocblas_scal_ex_fn,
-                               (handle, N, d_alpha, alpha_type, dx, x_type, incx, execution_type));
-                    CHECK_HIP_ERROR(hx_copy.transfer_from(dx));
-                    unit_check_general<Tx>(1, N, incx, hx, hx_copy);
+                // multi-GPU support
+                int device_id, device_count;
+                CHECK_HIP_ERROR(limit_device_count(device_count, (int)arg.devices));
+
+                for(int dev_id = 0; dev_id < device_count; dev_id++)
+                {
+                    CHECK_HIP_ERROR(hipGetDevice(&device_id));
+                    if(device_id != dev_id)
+                        CHECK_HIP_ERROR(hipSetDevice(dev_id));
+
+                    //New rocblas handle for new device
+                    rocblas_local_handle handle_copy{arg};
+
+                    //Allocate device memory in new device
+                    DEVICE_MEMCHECK(device_vector<Tx>, dx_copy, (N, incx));
+                    DEVICE_MEMCHECK(device_vector<Ta>, d_alpha_copy, (1));
+
+                    CHECK_HIP_ERROR(d_alpha_copy.transfer_from(halpha));
+
+                    CHECK_ROCBLAS_ERROR(
+                        rocblas_set_pointer_mode(handle_copy, rocblas_pointer_mode_device));
+
+                    for(int runs = 0; runs < arg.iters; runs++)
+                    {
+                        CHECK_HIP_ERROR(dx_copy.transfer_from(hx_gold));
+
+                        DAPI_CHECK(rocblas_scal_ex_fn,
+                                   (handle_copy,
+                                    N,
+                                    d_alpha_copy,
+                                    alpha_type,
+                                    dx_copy,
+                                    x_type,
+                                    incx,
+                                    execution_type));
+                        CHECK_HIP_ERROR(hx_copy.transfer_from(dx_copy));
+                        unit_check_general<Tx>(1, N, incx, hx, hx_copy);
+                    }
                 }
                 return;
             }

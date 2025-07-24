@@ -71,9 +71,9 @@ rocblas_status rocblas_internal_dot_launcher_64(rocblas_handle __restrict__ hand
     static constexpr int WIN      = rocblas_dot_WIN<T>();
     int64_t              n_passes = (n_64 - 1) / c_i64_grid_X_chunk + 1;
 
-    if(std::abs(incx_64) <= c_i32_max && std::abs(incy_64) < c_i32_max)
+    if(std::abs(incx_64) <= c_ILP64_i32_max && std::abs(incy_64) <= c_ILP64_i32_max)
     {
-        if(n_64 <= c_i32_max && batch_count_64 < c_i64_grid_YZ_chunk)
+        if(n_64 <= c_ILP64_i32_max && batch_count_64 < c_i64_grid_YZ_chunk)
         {
             // valid to use original 32bit API with truncated 64bit args
             return rocblas_internal_dot_launcher<rocblas_int, NB, CONJ, T, U, V>(handle,
@@ -138,7 +138,7 @@ rocblas_status rocblas_internal_dot_launcher_64(rocblas_handle __restrict__ hand
 
             // sum partial_results to results always needed if only to down convert
             ROCBLAS_LAUNCH_KERNEL((rocblas_dot_kernel_reduce<NB, WIN>),
-                                  dim3(1, batch_count),
+                                  dim3(batch_count),
                                   dim3(NB),
                                   0,
                                   handle->get_stream(),
@@ -231,7 +231,7 @@ rocblas_status rocblas_internal_dot_launcher_64(rocblas_handle __restrict__ hand
                 // reduce n partitions within batch chunk
                 // sum partial_results to results always needed as may down convert
                 ROCBLAS_LAUNCH_KERNEL((rocblas_dot_kernel_reduce<NB, WIN>),
-                                      dim3(1, batch_count),
+                                      dim3(batch_count),
                                       dim3(NB),
                                       0,
                                       handle->get_stream(),

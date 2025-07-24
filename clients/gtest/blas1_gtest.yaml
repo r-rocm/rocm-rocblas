@@ -243,19 +243,22 @@ Tests:
     api: [ INTERNAL, INTERNAL_64 ]
 
   - name: blas1_axpy_large_batch
-    category: pre_checkin
-    N: [ 7, 1000 ]
+    category: stress
+    N: [ 4 ]
     incx_incy: *incx_incy_range_small
-    alpha: [ 0, 1 ]
-    batch_count: [ 8193 ]
+    alpha: [ 1 ]
+    batch_count: [ *c_grid_yz_require_passes ]
     stride_scale: [ 1 ]
     function:
+      - axpy_batched_ex: *half_precision
       - axpy_batched: *single_precision
+      - axpy_strided_batched_ex: *half_precision
       - axpy_strided_batched: *single_precision
+
 
   - name: blas1_with_alpha
     category: pre_checkin
-    N: [ 50007, 1049600 ]
+    N: [ 50007 ]
     incx_incy: *incx_incy_range_small
     alpha_beta: *alpha_beta_range
     alphai_betai: *alphai_betai_range
@@ -264,7 +267,7 @@ Tests:
 
   - name: blas1_batched_with_alpha
     category: pre_checkin
-    N: [ 50000, 1049600 ]
+    N: [ 50000 ]
     incx_incy: *incx_incy_range_small
     alpha_beta: *alpha_beta_range
     alphai_betai: *alphai_betai_range
@@ -274,7 +277,7 @@ Tests:
 
   - name: blas1_strided_batched_with_alpha
     category: pre_checkin
-    N: [ 50000, 1049600 ]
+    N: [ 50000 ]
     incx_incy: *incx_incy_range_small
     alpha_beta: *alpha_beta_range
     alphai_betai: *alphai_betai_range
@@ -285,7 +288,7 @@ Tests:
 
   - name: axpy_multi_gpu
     category: multi_gpu
-    N: [ 50007, 1049600 ]
+    N: [ 50007 ]
     incx_incy: *incx_incy_range_small
     threads_streams: *common_threads_streams
     alpha_beta: *alpha_beta_range
@@ -307,7 +310,7 @@ Tests:
 
   - name: axpy_multi_threads_streams
     category: nightly
-    N: [ 50007, 1049600 ]
+    N: [ 50007 ]
     incx_incy: *incx_incy_range_small
     threads_streams: *common_threads_streams
     alpha_beta: *alpha_beta_range
@@ -511,9 +514,10 @@ Tests:
 
   - name: iamax_iamin_64
     category: nightly
-    N: [ 64 ]
+    N: [ 1025 ]
     arguments:
-      - { incx: 1, batch_count: 1 }
+      - { incx: 1, batch_count: 3 }
+    initialization: hpl
     api: [ FORTRAN_64 ]
     function:
       - iamax: *single_double_precisions_complex_real
@@ -531,6 +535,7 @@ Tests:
       - { N: 2, incx: 2147483649, batch_count: 1 }
       - { N: 2, incx: -2147483649, batch_count: 1 } # quick return
       - { N: 3, incx: 1, stride_x: 3, batch_count: *c_grid_yz_require_passes }
+    initialization: hpl
     api: [ C_64 ]
     os_flags: [ LINUX ]
     function:
@@ -827,7 +832,7 @@ Tests:
       # batched and strided_batched also shared code
     algo: [0, 1] # algo 1 is x dot x
     os_flags: LINUX
-    gpu_arch: '90a'
+    gpu_arch: ['90a','942']
 
   - name: blas1_size_t
     category: stress
@@ -837,7 +842,7 @@ Tests:
       - iamax: *single_precision
       - asum: *single_precision
       - nrm2_ex: *hpa_half_precision
-    gpu_arch: '90a'
+    gpu_arch: ['90a','942']
     os_flags: LINUX
 
   - name: blas1_size_t
@@ -847,7 +852,7 @@ Tests:
     alpha: [ 2 ]
     function:
       - scal_ex:  *hpa_half_precision
-    gpu_arch: '90a'
+    gpu_arch: ['90a','942']
     os_flags: LINUX
 
   - name: blas1_size_t
@@ -857,7 +862,7 @@ Tests:
     function:
       - swap: *single_precision
       - copy:  *single_precision
-    gpu_arch: '90a'
+    gpu_arch: ['90a','942']
     os_flags: LINUX
 
   - name: blas1_size_t
@@ -867,7 +872,7 @@ Tests:
     function:
       - rot_ex:  *hpa_half_precision
       # real rot shared kernels with rot_ex so only testing size_t with rot_ex and half.
-    gpu_arch: '90a'
+    gpu_arch: ['90a','942']
     os_flags: LINUX
 
   - name: blas1_size_t
@@ -877,7 +882,7 @@ Tests:
     function:
       - rot_ex:  *single_precision_complex
       # complex rot shared kernels with rot_ex so only testing size_t with rot_ex and single_precision_complex.
-    gpu_arch: '90a'
+    gpu_arch: ['90a','942']
     os_flags: LINUX
 
   - name: blas1_size_t
@@ -886,7 +891,7 @@ Tests:
     function:
       - rotm:  *single_precision
       #all rotm functions use same templated source so it is only necessary to test single_precision.
-    gpu_arch: '90a'
+    gpu_arch: ['90a','942']
     os_flags: LINUX
 
 # All functions with incx, no incy, no alpha
@@ -895,7 +900,7 @@ Tests:
 #fortran
   - name: blas1
     category: quick
-    N: [-1, 0, 1024]
+    N: [-1, 0, 1025]
     incx: *incx_range_small
     api: FORTRAN
     function:
@@ -907,7 +912,7 @@ Tests:
 
   - name: blas1_batched
     category: quick
-    N: [-1, 0, 1024]
+    N: [-1, 0, 1026]
     incx: *incx_range_small
     batch_count: [ -1, 0, 5 ]
     api: FORTRAN
@@ -920,7 +925,7 @@ Tests:
 
   - name: blas1_strided_batched
     category: quick
-    N: [-1, 0, 1024]
+    N: [-1, 0, 1027]
     incx: *incx_range_small
     batch_count: [ -1, 0, 5 ]
     stride_scale: [ 1, 2 ]
@@ -968,6 +973,18 @@ Tests:
       - nrm2_strided_batched_ex: *nrm2_ex_precisions
       - iamax_strided_batched: *single_double_precisions_complex_real
       - iamin_strided_batched: *single_double_precisions_complex_real
+
+  - name: blas1_large_batch
+    category: stress
+    arguments:
+      - { N: 2, incx: 1, stride_x: 2, batch_count: *c_grid_yz_require_passes }
+    function:
+      - asum_batched: *single_precision
+      - asum_strided_batched: *single_precision
+      - nrm2_batched: *single_precision
+      - nrm2_strided_batched: *single_precision
+      - nrm2_batched_ex: *nrm2_ex_precisions_double
+      - nrm2_strided_batched_ex: *nrm2_ex_precisions_double
 
 # pre_checkin
   - name: blas1
@@ -1063,6 +1080,34 @@ Tests:
       - rot:   *rot_precisions
       - rot_ex: *rot_ex_precisions
       - rotm:  *single_double_precisions
+
+  - name: blas1_large_batch
+    category: stress
+    N: [ 5 ]
+    incx: 1
+    incy: 1
+    batch_count: [ *c_grid_yz_require_passes ]
+    stride_scale: [ 1 ]
+    function:
+      - copy_batched:  *single_double_precisions_complex_real
+      - copy_strided_batched:  *single_double_precisions_complex_real
+      - iamax_batched: *double_precision_complex_real
+      - iamin_batched: *double_precision_complex_real
+      - iamax_strided_batched: *double_precision_complex_real
+      - iamin_strided_batched: *double_precision_complex_real
+      - rot_batched:   *rot_precisions
+      - rot_batched_ex: *rot_ex_precisions
+      - rot_strided_batched:   *rot_precisions
+      - rot_strided_batched_ex: *rot_ex_precisions
+      - rotm_batched:  *single_double_precisions
+      - rotm_strided_batched:  *single_double_precisions
+      - scal_batched:  *single_double_precisions_complex_real
+      - scal_strided_batched:  *single_double_precisions_complex_real
+      - scal_batched_ex: *scal_ex_bfloat_half_single_double_complex_real_precisions
+      - scal_strided_batched_ex: *scal_ex_bfloat_half_single_double_complex_real_precisions
+      - swap_batched:  *single_double_precisions_complex_real
+      - swap_strided_batched:  *single_double_precisions_complex_real
+
 
   # quick tests will fallback to original kernels at launcher level
   - name: copy_64
@@ -1254,6 +1299,20 @@ Tests:
       - dotc_strided_batched_ex:   *half_precision
 
 # pre_checkin
+
+  - name: blas1_dot_reduce_kernel
+    category: pre_checkin
+    N: [ 10100103 ]
+    incx_incy: *incx_incy_range_small
+    batch_count: [2, 3]
+    initialization: hpl
+    function:
+      - dot:   *single_double_precisions_complex_real
+      - dot_batched:   *half_bfloat_single_double_complex_real_precisions
+      - dotc_batched:  *single_double_precisions_complex
+      - dot_batched_ex: *half_bfloat_single_double_complex_real_precisions
+      - dotc_batched_ex: *half_bfloat_single_double_complex_real_precisions
+
   - name: blas1_dot_internal_api
     category: pre_checkin
     N: [ 1000 ] # must be small enough for single block so no workspace required (see testing code)
@@ -1371,6 +1430,16 @@ Tests:
       - dotc_strided_batched_ex:  *double_precision_complex_real
       - rot_strided_batched_ex: *rot_ex_precisions
       - rotm_strided_batched:  *single_double_precisions
+
+  - name: dot_large_batch
+    category: stress
+    arguments:
+      - { N: 3, incx: 1, incy: 1, stride_x: 3, stride_y: 3, batch_count: *c_grid_yz_require_passes }
+    function:
+      - dot_batched: *half_precision
+      - dot_batched_ex: *half_precision
+      - dot_strided_batched: *half_precision
+      - dot_strided_batched_ex: *half_precision
 
 # Tests for testing rocblas_dot_batched_4_kernel
   - name: dot_batched_kernel_test
@@ -1791,6 +1860,7 @@ Tests:
     incx_incy: *incx_incy_range_small
     initialization: hpl
     iters: 5
+    devices: 4
     pointer_mode_host: false
     repeatability_check: true
     atomics_mode: 0

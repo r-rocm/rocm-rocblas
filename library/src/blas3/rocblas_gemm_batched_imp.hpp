@@ -74,8 +74,9 @@ namespace
         auto saved_pointer_mode = handle->push_pointer_mode(rocblas_pointer_mode_host);
 
         // Perform logging
-        auto layer_mode     = handle->layer_mode;
-        auto check_numerics = handle->check_numerics;
+        auto   layer_mode     = handle->layer_mode;
+        auto   check_numerics = handle->check_numerics;
+        Logger logger;
         if(layer_mode
            & (rocblas_layer_mode_log_trace | rocblas_layer_mode_log_bench
               | rocblas_layer_mode_log_profile))
@@ -84,76 +85,76 @@ namespace
             auto trans_b_letter = rocblas_transpose_letter(trans_b);
 
             if(layer_mode & rocblas_layer_mode_log_trace)
-                log_trace(handle,
-                          rocblas_gemm_batched_name<T>,
-                          trans_a,
-                          trans_b,
-                          m,
-                          n,
-                          k,
-                          LOG_TRACE_SCALAR_VALUE(handle, alpha),
-                          A,
-                          lda,
-                          B,
-                          ldb,
-                          LOG_TRACE_SCALAR_VALUE(handle, beta),
-                          C,
-                          ldc,
-                          batch_count);
+                logger.log_trace(handle,
+                                 rocblas_gemm_batched_name<T>,
+                                 trans_a,
+                                 trans_b,
+                                 m,
+                                 n,
+                                 k,
+                                 LOG_TRACE_SCALAR_VALUE(handle, alpha),
+                                 A,
+                                 lda,
+                                 B,
+                                 ldb,
+                                 LOG_TRACE_SCALAR_VALUE(handle, beta),
+                                 C,
+                                 ldc,
+                                 batch_count);
 
             if(layer_mode & rocblas_layer_mode_log_bench)
-                log_bench(handle,
-                          ROCBLAS_API_BENCH " -f gemm_batched -r",
-                          rocblas_precision_string<T>,
-                          "--transposeA",
-                          trans_a_letter,
-                          "--transposeB",
-                          trans_b_letter,
-                          "-m",
-                          m,
-                          "-n",
-                          n,
-                          "-k",
-                          k,
-                          LOG_BENCH_SCALAR_VALUE(handle, alpha),
-                          "--lda",
-                          lda,
-                          "--ldb",
-                          ldb,
-                          LOG_BENCH_SCALAR_VALUE(handle, beta),
-                          "--ldc",
-                          ldc,
-                          "--batch_count",
-                          batch_count);
+                logger.log_bench(handle,
+                                 ROCBLAS_API_BENCH " -f gemm_batched -r",
+                                 rocblas_precision_string<T>,
+                                 "--transposeA",
+                                 trans_a_letter,
+                                 "--transposeB",
+                                 trans_b_letter,
+                                 "-m",
+                                 m,
+                                 "-n",
+                                 n,
+                                 "-k",
+                                 k,
+                                 LOG_BENCH_SCALAR_VALUE(handle, alpha),
+                                 "--lda",
+                                 lda,
+                                 "--ldb",
+                                 ldb,
+                                 LOG_BENCH_SCALAR_VALUE(handle, beta),
+                                 "--ldc",
+                                 ldc,
+                                 "--batch_count",
+                                 batch_count);
 
             if(layer_mode & rocblas_layer_mode_log_profile)
-                log_profile(handle,
-                            rocblas_gemm_batched_name<T>,
-                            "transA",
-                            trans_a_letter,
-                            "transB",
-                            trans_b_letter,
-                            "M",
-                            m,
-                            "N",
-                            n,
-                            "K",
-                            k,
-                            "alpha",
-                            value_category(*alpha),
-                            "lda",
-                            lda,
-                            "ldb",
-                            ldb,
-                            "beta",
-                            value_category(*beta),
-                            "ldc",
-                            ldc,
-                            "batch_count",
-                            batch_count);
+                logger.log_profile(handle,
+                                   rocblas_gemm_batched_name<T>,
+                                   "transA",
+                                   trans_a_letter,
+                                   "transB",
+                                   trans_b_letter,
+                                   "M",
+                                   m,
+                                   "N",
+                                   n,
+                                   "K",
+                                   k,
+                                   "alpha",
+                                   value_category(*alpha),
+                                   "lda",
+                                   lda,
+                                   "ldb",
+                                   ldb,
+                                   "beta",
+                                   value_category(*beta),
+                                   "ldc",
+                                   ldc,
+                                   "batch_count",
+                                   batch_count);
         }
 
-        auto validArgs = rocblas_validateArgs(
+        auto validArgs = rocblas_gemm_arg_check(
             handle, trans_a, trans_b, m, n, k, alpha, A, lda, B, ldb, beta, C, ldc, batch_count);
 
         if(validArgs != rocblas_status_continue)
@@ -293,67 +294,3 @@ namespace
     IMPL(ROCBLAS_API(rocblas_cgemm_batched), TI_, rocblas_float_complex);  \
     IMPL(ROCBLAS_API(rocblas_zgemm_batched), TI_, rocblas_double_complex); \
     } // extern "C"
-
-/*******************************************************************************
- * Batched GEMM Kernel name APIs
- ******************************************************************************/
-extern "C" {
-
-rocblas_status rocblas_hgemm_batched_kernel_name(rocblas_handle      handle,
-                                                 rocblas_operation   trans_a,
-                                                 rocblas_operation   trans_b,
-                                                 rocblas_int         m,
-                                                 rocblas_int         n,
-                                                 rocblas_int         k,
-                                                 const rocblas_half* alpha,
-                                                 const rocblas_half* A[],
-                                                 rocblas_int         lda,
-                                                 const rocblas_half* B[],
-                                                 rocblas_int         ldb,
-                                                 const rocblas_half* beta,
-                                                 rocblas_half*       C[],
-                                                 rocblas_int         ldc,
-                                                 rocblas_int         batch_count)
-{
-    return rocblas_status_not_implemented;
-}
-
-rocblas_status rocblas_sgemm_batched_kernel_name(rocblas_handle    handle,
-                                                 rocblas_operation trans_a,
-                                                 rocblas_operation trans_b,
-                                                 rocblas_int       m,
-                                                 rocblas_int       n,
-                                                 rocblas_int       k,
-                                                 const float*      alpha,
-                                                 const float*      A[],
-                                                 rocblas_int       lda,
-                                                 const float*      B[],
-                                                 rocblas_int       ldb,
-                                                 const float*      beta,
-                                                 float*            C[],
-                                                 rocblas_int       ldc,
-                                                 rocblas_int       batch_count)
-{
-    return rocblas_status_not_implemented;
-}
-
-rocblas_status rocblas_dgemm_batched_kernel_name(rocblas_handle    handle,
-                                                 rocblas_operation trans_a,
-                                                 rocblas_operation trans_b,
-                                                 rocblas_int       m,
-                                                 rocblas_int       n,
-                                                 rocblas_int       k,
-                                                 const double*     alpha,
-                                                 const double*     A[],
-                                                 rocblas_int       lda,
-                                                 const double*     B[],
-                                                 rocblas_int       ldb,
-                                                 const double*     beta,
-                                                 double*           C[],
-                                                 rocblas_int       ldc,
-                                                 rocblas_int       batch_count)
-{
-    return rocblas_status_not_implemented;
-}
-
-} // extern "C"

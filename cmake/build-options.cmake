@@ -1,5 +1,5 @@
 # ########################################################################
-# Copyright (C) 2016-2023 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (C) 2016-2024 Advanced Micro Devices, Inc. All rights reserved.
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -27,6 +27,8 @@
 # presented in the superbuild GUI, but then passed into the ExternalProject as -D
 # parameters, which would already define them.
 
+include(CheckCXXCompilerFlag)
+
 option( BUILD_VERBOSE "Output additional build information" OFF )
 
 # BUILD_SHARED_LIBS is a cmake built-in; we make it an explicit option such that it shows in cmake-gui
@@ -46,6 +48,15 @@ endif()
 # this file is intended to be loaded by toolchain or early as sets global compiler flags
 # rocm-cmake checks will throw warnings if set later as cmake watchers installed
 
+
+option(BUILD_OFFLOAD_COMPRESS "Build rocBLAS with offload compression" ON)
+if (BUILD_OFFLOAD_COMPRESS)
+  check_cxx_compiler_flag("--offload-compress" CXX_COMPILER_SUPPORTS_OFFLOAD_COMPRESS)
+  if (NOT CXX_COMPILER_SUPPORTS_OFFLOAD_COMPRESS)
+    message( STATUS "WARNING: BUILD_OFFLOAD_COMPRESS=ON but flag not supported by compiler. Ignoring option." )
+  endif()
+endif()
+
 # FOR OPTIONAL CODE COVERAGE
 option(BUILD_CODE_COVERAGE "Build rocBLAS with code coverage enabled" OFF)
 
@@ -61,12 +72,16 @@ if( BUILD_WITH_TENSILE )
 
   set( Tensile_LOGIC "asm_full" CACHE STRING "Tensile to use which logic?")
   set( Tensile_CODE_OBJECT_VERSION "default" CACHE STRING "Tensile code_object_version")
-  set( Tensile_COMPILER "hipcc" CACHE STRING "Tensile compiler")
+  if (WIN32)
+    set( Tensile_COMPILER "clang++" CACHE STRING "Tensile compiler")
+  else()
+    set( Tensile_COMPILER "amdclang++" CACHE STRING "Tensile compiler")
+  endif()
   set( Tensile_LIBRARY_FORMAT "msgpack" CACHE STRING "Tensile library format")
 
   set_property( CACHE Tensile_LOGIC PROPERTY STRINGS aldebaran asm_full asm_lite asm_miopen hip_lite other )
   set_property( CACHE Tensile_CODE_OBJECT_VERSION PROPERTY STRINGS default V4 V5 )
-  set_property( CACHE Tensile_COMPILER PROPERTY STRINGS hcc hipcc)
+  set_property( CACHE Tensile_COMPILER PROPERTY STRINGS amdclang++ hipcc clang++)
   set_property( CACHE Tensile_LIBRARY_FORMAT PROPERTY STRINGS msgpack yaml)
 
   option( Tensile_MERGE_FILES "Tensile to merge kernels and solutions files?" ON )

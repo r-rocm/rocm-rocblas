@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2020-2023 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2020-2024 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -24,24 +24,67 @@
 
 #include "check_numerics_matrix.hpp"
 #include "handle.hpp"
+#include "rocblas_gemm.hpp"
+#include "rocblas_level3_threshold.hpp"
 
-template <typename TScal, typename TConstPtr, typename TPtr>
+template <typename T>
+inline bool rocblas_use_only_gemm(rocblas_handle handle, rocblas_int n, rocblas_int k)
+{
+    //Identifying the architecture to have an appropriate optimization
+    bool is_gfx942 = handle->getArch() == 942 ? true : false;
+    bool is_gfx90a = handle->getArch() == 910 ? true : false;
+
+    //Identifying the precision to have an appropriate optimization
+    constexpr bool is_float          = std::is_same_v<T, float>;
+    constexpr bool is_double         = std::is_same_v<T, double>;
+    constexpr bool is_complex_float  = std::is_same_v<T, rocblas_float_complex>;
+    constexpr bool is_complex_double = std::is_same_v<T, rocblas_double_complex>;
+
+    //Optimized kernel which uses only GEMM
+    return k >= syrk_k_lower_threshold
+           && ((is_gfx942
+                && (((is_float || is_double) && n < sdsyrk_gfx942_n_higher_threshold)
+                    || (is_complex_double && n < zsyrk_gfx942_n_higher_threshold)
+                    || (is_complex_float && n < csyrk_gfx942_n_higher_threshold)))
+               || (is_gfx90a
+                   && (((is_float || is_double) && n < sdsyrk_gfx90a_n_higher_threshold)
+                       || (is_complex_float || is_complex_double)
+                              && n < czsyrk_gfx90a_n_higher_threshold)));
+}
+
+template <typename T>
+inline size_t rocblas_internal_syrk_herk_workspace(rocblas_handle handle,
+                                                   rocblas_int    n,
+                                                   rocblas_int    k,
+                                                   rocblas_int    batch_count)
+{
+    size_t size = 1;
+
+    //Allocating workspace memory when only using gemm
+    if(rocblas_use_only_gemm<T>(handle, n, k))
+        if(n > 0 && batch_count > 0)
+            size = ((int64_t(n) * (n - 1)) / 2) * sizeof(T) * batch_count;
+
+    return size;
+}
+
+template <typename API_INT, typename TScal, typename TConstPtr, typename TPtr>
 inline rocblas_status rocblas_syrk_arg_check(rocblas_handle    handle,
                                              rocblas_fill      uplo,
                                              rocblas_operation transA,
-                                             rocblas_int       n,
-                                             rocblas_int       k,
+                                             API_INT           n,
+                                             API_INT           k,
                                              const TScal*      alpha,
                                              TConstPtr         AP,
                                              rocblas_stride    offsetA,
-                                             rocblas_int       lda,
+                                             API_INT           lda,
                                              rocblas_stride    strideA,
                                              const TScal*      beta,
                                              TPtr              CP,
                                              rocblas_stride    offsetC,
-                                             rocblas_int       ldc,
+                                             API_INT           ldc,
                                              rocblas_stride    strideC,
-                                             rocblas_int       batch_count)
+                                             API_INT           batch_count)
 {
     if(uplo != rocblas_fill_lower && uplo != rocblas_fill_upper)
         return rocblas_status_invalid_value;
@@ -82,23 +125,23 @@ inline rocblas_status rocblas_syrk_arg_check(rocblas_handle    handle,
     return rocblas_status_continue;
 }
 
-template <typename TScal, typename TConstPtr, typename TPtr>
+template <typename API_INT, typename TScal, typename TConstPtr, typename TPtr>
 inline rocblas_status rocblas_herk_arg_check(rocblas_handle    handle,
                                              rocblas_fill      uplo,
                                              rocblas_operation transA,
-                                             rocblas_int       n,
-                                             rocblas_int       k,
+                                             API_INT           n,
+                                             API_INT           k,
                                              TScal             alpha,
                                              TConstPtr         AP,
                                              rocblas_stride    offsetA,
-                                             rocblas_int       lda,
+                                             API_INT           lda,
                                              rocblas_stride    strideA,
                                              TScal             beta,
                                              TPtr              CP,
                                              rocblas_stride    offsetC,
-                                             rocblas_int       ldc,
+                                             API_INT           ldc,
                                              rocblas_stride    strideC,
-                                             rocblas_int       batch_count)
+                                             API_INT           batch_count)
 {
     if(uplo != rocblas_fill_lower && uplo != rocblas_fill_upper)
         return rocblas_status_invalid_value;
@@ -129,20 +172,44 @@ inline rocblas_status rocblas_herk_arg_check(rocblas_handle    handle,
     return rocblas_status_continue;
 }
 
+template <rocblas_int NB,
+          bool        BATCHED,
+          bool        HERM,
+          typename T,
+          typename TScal,
+          typename TConstPtr,
+          typename TPtr>
+rocblas_status rocblas_internal_syrk_herk_template(rocblas_handle    handle,
+                                                   rocblas_fill      uplo,
+                                                   rocblas_operation trans_A,
+                                                   rocblas_int       n,
+                                                   rocblas_int       k,
+                                                   const TScal*      alpha_in,
+                                                   TConstPtr         A,
+                                                   rocblas_stride    offset_A,
+                                                   rocblas_int       lda,
+                                                   rocblas_stride    stride_A,
+                                                   const TScal*      beta_in,
+                                                   TPtr              C,
+                                                   rocblas_stride    offset_C,
+                                                   rocblas_int       ldc,
+                                                   rocblas_stride    stride_C,
+                                                   rocblas_int       batch_count);
+
 template <bool HERM, typename TConstPtr, typename TPtr>
 rocblas_status rocblas_herk_syrk_check_numerics(const char*       function_name,
                                                 rocblas_handle    handle,
                                                 rocblas_fill      uplo,
                                                 rocblas_operation trans,
-                                                rocblas_int       n,
-                                                rocblas_int       k,
+                                                int64_t           n_64,
+                                                int64_t           k_64,
                                                 TConstPtr         A,
-                                                rocblas_int       lda,
+                                                int64_t           lda_64,
                                                 rocblas_stride    strideA,
                                                 TPtr              C,
-                                                rocblas_int       ldc,
+                                                int64_t           ldc_64,
                                                 rocblas_stride    strideC,
-                                                rocblas_int       batch_count,
+                                                int64_t           batch_count_64,
                                                 const int         check_numerics,
                                                 bool              is_input);
 

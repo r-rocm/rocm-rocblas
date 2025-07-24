@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2024 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2018-2025 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -27,12 +27,12 @@
 template <typename Tx, typename Ty = Tx, typename Tr = Ty, typename Tex = Tr, bool CONJ = false>
 void testing_dot_ex_bad_arg(const Arguments& arg)
 {
-    auto rocblas_dot_ex_fn = arg.api == FORTRAN
+    auto rocblas_dot_ex_fn = arg.api & c_API_FORTRAN
                                  ? (CONJ ? rocblas_dotc_ex_fortran : rocblas_dot_ex_fortran)
                                  : (CONJ ? rocblas_dotc_ex : rocblas_dot_ex);
     auto rocblas_dot_ex_fn_64
-        = arg.api == FORTRAN_64 ? (CONJ ? rocblas_dotc_ex_64_fortran : rocblas_dot_ex_64_fortran)
-                                : (CONJ ? rocblas_dotc_ex_64 : rocblas_dot_ex_64);
+        = arg.api & c_API_FORTRAN ? (CONJ ? rocblas_dotc_ex_64_fortran : rocblas_dot_ex_64_fortran)
+                                  : (CONJ ? rocblas_dotc_ex_64 : rocblas_dot_ex_64);
 
     rocblas_datatype x_type         = rocblas_type2datatype<Tx>();
     rocblas_datatype y_type         = rocblas_type2datatype<Ty>();
@@ -46,14 +46,9 @@ void testing_dot_ex_bad_arg(const Arguments& arg)
     rocblas_local_handle handle{arg};
 
     // Allocate device memory
-    device_vector<Tx> dx(N, incx);
-    device_vector<Ty> dy(N, incy);
-    device_vector<Tr> d_rocblas_result(1);
-
-    // Check device memory allocation
-    CHECK_DEVICE_ALLOCATION(dx.memcheck());
-    CHECK_DEVICE_ALLOCATION(dy.memcheck());
-    CHECK_DEVICE_ALLOCATION(d_rocblas_result.memcheck());
+    DEVICE_MEMCHECK(device_vector<Tx>, dx, (N, incx));
+    DEVICE_MEMCHECK(device_vector<Ty>, dy, (N, incy));
+    DEVICE_MEMCHECK(device_vector<Tr>, d_rocblas_result, (1));
 
     CHECK_ROCBLAS_ERROR(rocblas_set_pointer_mode(handle, rocblas_pointer_mode_device));
 
@@ -103,21 +98,15 @@ void testing_dot_ex_bad_arg(const Arguments& arg)
         (handle, N, dx, x_type, incx, dy, y_type, incy, nullptr, result_type, execution_type));
 }
 
-template <typename Tx, typename Ty = Tx, typename Tr = Ty, typename Tex = Tr>
-void testing_dotc_ex_bad_arg(const Arguments& arg)
-{
-    testing_dot_ex_bad_arg<Tx, Ty, Tr, Tex, true>(arg);
-}
-
 template <typename Tx, typename Ty = Tx, typename Tr = Ty, typename Tex = Tr, bool CONJ = false>
 void testing_dot_ex(const Arguments& arg)
 {
-    auto rocblas_dot_ex_fn = arg.api == FORTRAN
+    auto rocblas_dot_ex_fn = arg.api & c_API_FORTRAN
                                  ? (CONJ ? rocblas_dotc_ex_fortran : rocblas_dot_ex_fortran)
                                  : (CONJ ? rocblas_dotc_ex : rocblas_dot_ex);
     auto rocblas_dot_ex_fn_64
-        = arg.api == FORTRAN_64 ? (CONJ ? rocblas_dotc_ex_64_fortran : rocblas_dot_ex_64_fortran)
-                                : (CONJ ? rocblas_dotc_ex_64 : rocblas_dot_ex_64);
+        = arg.api & c_API_FORTRAN ? (CONJ ? rocblas_dotc_ex_64_fortran : rocblas_dot_ex_64_fortran)
+                                  : (CONJ ? rocblas_dotc_ex_64 : rocblas_dot_ex_64);
 
     rocblas_datatype x_type         = arg.a_type;
     rocblas_datatype y_type         = arg.b_type;
@@ -135,11 +124,9 @@ void testing_dot_ex(const Arguments& arg)
     // check to prevent undefined memmory allocation error
     if(N <= 0)
     {
-        device_vector<Tr> d_rocblas_result(1);
-        CHECK_DEVICE_ALLOCATION(d_rocblas_result.memcheck());
+        DEVICE_MEMCHECK(device_vector<Tr>, d_rocblas_result, (1));
 
-        host_vector<Tr> h_rocblas_result(1);
-        CHECK_HIP_ERROR(h_rocblas_result.memcheck());
+        HOST_MEMCHECK(host_vector<Tr>, h_rocblas_result, (1));
 
         CHECK_ROCBLAS_ERROR(rocblas_set_pointer_mode(handle, rocblas_pointer_mode_device));
         DAPI_CHECK(rocblas_dot_ex_fn,
@@ -181,21 +168,15 @@ void testing_dot_ex(const Arguments& arg)
 
     // Naming: `h` is in CPU (host) memory(eg hx), `d` is in GPU (device) memory (eg dx).
     // Allocate host memory
-    host_vector<Tx> hx(N, incx);
-    host_vector<Ty> hy(N, incy);
-    host_vector<Tr> cpu_result(1, 1);
-    host_vector<Tr> rocblas_result_host(1, 1);
-    host_vector<Tr> rocblas_result_device(1, 1);
+    HOST_MEMCHECK(host_vector<Tx>, hx, (N, incx));
+    HOST_MEMCHECK(host_vector<Ty>, hy, (N, incy));
+    HOST_MEMCHECK(host_vector<Tr>, cpu_result, (1, 1));
+    HOST_MEMCHECK(host_vector<Tr>, rocblas_result, (1, 1));
 
     // Allocate device memory
-    device_vector<Tx> dx(N, incx);
-    device_vector<Ty> dy(N, incy);
-    device_vector<Tr> d_rocblas_result_device(1);
-
-    // Check device memory allocation
-    CHECK_DEVICE_ALLOCATION(dx.memcheck());
-    CHECK_DEVICE_ALLOCATION(dy.memcheck());
-    CHECK_DEVICE_ALLOCATION(d_rocblas_result_device.memcheck());
+    DEVICE_MEMCHECK(device_vector<Tx>, dx, (N, incx));
+    DEVICE_MEMCHECK(device_vector<Ty>, dy, (N, incy));
+    DEVICE_MEMCHECK(device_vector<Tr>, d_rocblas_result_device, (1));
 
     // Initialize data on host memory
     rocblas_init_vector(hx, arg, rocblas_client_alpha_sets_nan, true);
@@ -227,7 +208,7 @@ void testing_dot_ex(const Arguments& arg)
                         dy_ptr,
                         y_type,
                         incy,
-                        rocblas_result_host,
+                        rocblas_result,
                         result_type,
                         execution_type));
         }
@@ -251,29 +232,55 @@ void testing_dot_ex(const Arguments& arg)
             handle.post_test(arg);
             if(arg.repeatability_check)
             {
-                host_vector<Tr> rocblas_result_device_copy(1, 1);
-                CHECK_HIP_ERROR(rocblas_result_device_copy.memcheck());
+                HOST_MEMCHECK(host_vector<Tr>, rocblas_result_device_copy, (1, 1));
 
-                CHECK_HIP_ERROR(rocblas_result_device.transfer_from(d_rocblas_result_device));
+                CHECK_HIP_ERROR(rocblas_result.transfer_from(d_rocblas_result_device));
 
-                for(int i = 0; i < arg.iters; i++)
+                // multi-GPU support
+                int device_id, device_count;
+                CHECK_HIP_ERROR(limit_device_count(device_count, (int)arg.devices));
+
+                for(int dev_id = 0; dev_id < device_count; dev_id++)
                 {
-                    DAPI_CHECK(rocblas_dot_ex_fn,
-                               (handle,
-                                N,
-                                dx,
-                                x_type,
-                                incx,
-                                dy_ptr,
-                                y_type,
-                                incy,
-                                d_rocblas_result_device,
-                                result_type,
-                                execution_type));
-                    CHECK_HIP_ERROR(
-                        rocblas_result_device_copy.transfer_from(d_rocblas_result_device));
-                    unit_check_general<Tr>(
-                        1, 1, 1, rocblas_result_device, rocblas_result_device_copy);
+                    CHECK_HIP_ERROR(hipGetDevice(&device_id));
+                    if(device_id != dev_id)
+                        CHECK_HIP_ERROR(hipSetDevice(dev_id));
+
+                    //New rocblas handle for new device
+                    rocblas_local_handle handle_copy{arg};
+
+                    //Allocate device memory in new device
+                    DEVICE_MEMCHECK(device_vector<Tx>, dx_copy, (N, incx));
+                    DEVICE_MEMCHECK(device_vector<Ty>, dy_copy, (N, incy));
+                    DEVICE_MEMCHECK(device_vector<Tr>, d_rocblas_result_device_copy, (1));
+
+                    // copy data from CPU to device
+                    CHECK_HIP_ERROR(dx_copy.transfer_from(hx));
+                    CHECK_HIP_ERROR(dy_copy.transfer_from(hy));
+
+                    auto dy_ptr_copy = (arg.algo) ? (Tx*)(dx_copy) : (Ty*)(dy_copy);
+
+                    CHECK_ROCBLAS_ERROR(
+                        rocblas_set_pointer_mode(handle_copy, rocblas_pointer_mode_device));
+
+                    for(int runs = 0; runs < arg.iters; runs++)
+                    {
+                        DAPI_CHECK(rocblas_dot_ex_fn,
+                                   (handle_copy,
+                                    N,
+                                    dx_copy,
+                                    x_type,
+                                    incx,
+                                    dy_ptr_copy,
+                                    y_type,
+                                    incy,
+                                    d_rocblas_result_device_copy,
+                                    result_type,
+                                    execution_type));
+                        CHECK_HIP_ERROR(
+                            rocblas_result_device_copy.transfer_from(d_rocblas_result_device_copy));
+                        unit_check_general<Tr>(1, 1, 1, rocblas_result, rocblas_result_device_copy);
+                    }
                 }
                 return;
             }
@@ -284,55 +291,41 @@ void testing_dot_ex(const Arguments& arg)
         (CONJ ? ref_dotc<Tx, Tr> : ref_dot<Tx, Tr>)(N, hx, incx, hy_ptr, incy, cpu_result);
         cpu_time_used = get_time_us_no_sync() - cpu_time_used;
 
-        // For large N, rocblas_half tends to diverge proportional to N
-        // Tolerance is slightly greater than 1 / 1024.0
-        bool near_check = arg.initialization == rocblas_initialization::hpl
-                          || (std::is_same_v<Tex, rocblas_half> && N > 10000);
+        auto compare_to_gold = [&] {
+            bool near_check = arg.initialization == rocblas_initialization::hpl
+                              || (sizeof(Tr) == 2 && N > 10000);
 
-        if(arg.pointer_mode_host)
-        {
             if(arg.unit_check)
             {
                 if(near_check)
                 {
-                    const double tol = N * sum_error_tolerance<Tex>;
-                    near_check_general<Tr>(1, 1, 1, cpu_result, rocblas_result_host, tol);
+                    double tol = dot_near_tolerance<Tex, Tx, Tr>(
+                        rocblas_handle(handle)->getArchMajor(), N, cpu_result[0]);
+                    near_check_general<Tr>(1, 1, 1, cpu_result, rocblas_result, tol);
                 }
                 else
                 {
-                    unit_check_general<Tr>(1, 1, 1, cpu_result, rocblas_result_host);
+                    unit_check_general<Tr>(1, 1, 1, cpu_result, rocblas_result);
                 }
             }
 
+            double error = 0.0;
             if(arg.norm_check)
             {
-                rocblas_error_host
-                    = double(rocblas_abs((cpu_result[0] - rocblas_result_host[0]) / cpu_result[0]));
+                error = double(rocblas_abs((cpu_result[0] - rocblas_result[0]) / cpu_result[0]));
             }
+            return error;
+        };
+
+        if(arg.pointer_mode_host)
+        {
+            rocblas_error_host = compare_to_gold();
         }
 
         if(arg.pointer_mode_device)
         {
-            CHECK_HIP_ERROR(rocblas_result_device.transfer_from(d_rocblas_result_device));
-
-            if(arg.unit_check)
-            {
-                if(near_check)
-                {
-                    const double tol = N * sum_error_tolerance<Tex>;
-                    near_check_general<Tr>(1, 1, 1, cpu_result, rocblas_result_device, tol);
-                }
-                else
-                {
-                    unit_check_general<Tr>(1, 1, 1, cpu_result, rocblas_result_device);
-                }
-            }
-
-            if(arg.norm_check)
-            {
-                rocblas_error_device = double(
-                    rocblas_abs((cpu_result[0] - rocblas_result_device[0]) / cpu_result[0]));
-            }
+            CHECK_HIP_ERROR(rocblas_result.transfer_from(d_rocblas_result_device));
+            rocblas_error_device = compare_to_gold();
         }
     }
 
@@ -375,10 +368,4 @@ void testing_dot_ex(const Arguments& arg)
                                                                   rocblas_error_host,
                                                                   rocblas_error_device);
     }
-}
-
-template <typename Tx, typename Ty = Tx, typename Tr = Ty, typename Tex = Tr>
-void testing_dotc_ex(const Arguments& arg)
-{
-    testing_dot_ex<Tx, Ty, Tr, Tex, true>(arg);
 }

@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2024 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2018-2025 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -107,6 +107,39 @@ ROCBLAS_CLANG_STATIC constexpr double
     sum_error_tolerance_for_gfx11<rocblas_double_complex,
                                   rocblas_double_complex,
                                   rocblas_double_complex> = 1 / 1000000.0;
+
+template <typename T>
+double sum_near_tolerance(int64_t n, real_t<T> sum)
+{
+    double count     = (n == 1 || n > 4) ? sqrt(n) : 2.0;
+    double tolerance = sum_error_tolerance<T> * 2.0 * count;
+    if(sum != 0)
+    {
+        tolerance *= std::abs(sum);
+    }
+    return tolerance;
+}
+
+template <typename Tc, typename Ti, typename To>
+double dot_near_tolerance(int arch_major, int64_t n, To sum)
+{
+    double tolerance;
+    if(arch_major == 11 && sizeof(To) == 2)
+    {
+        double count = (n == 1 || n > 4) ? sqrt(n) : 2.0;
+        tolerance    = sum_error_tolerance_for_gfx11<Tc, Ti, To> * 2.0 * count;
+        if(sum != 0)
+        {
+            tolerance *= rocblas_abs(sum);
+        }
+    }
+    else
+    {
+        tolerance = sum_error_tolerance<Tc> * n;
+    }
+
+    return tolerance;
+}
 
 #ifndef GOOGLE_TEST
 #define NEAR_CHECK(M, N, lda, strideA, hCPU, hGPU, batch_count, err, NEAR_ASSERT)

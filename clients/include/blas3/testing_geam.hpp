@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2024 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2018-2025 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -22,40 +22,33 @@
 
 #pragma once
 
-#include "cblas_interface.hpp"
-#include "flops.hpp"
-#include "norm.hpp"
-#include "rocblas.hpp"
-#include "rocblas_datatype2string.hpp"
-#include "rocblas_init.hpp"
-#include "rocblas_math.hpp"
-#include "rocblas_matrix.hpp"
-#include "rocblas_random.hpp"
-#include "rocblas_test.hpp"
-#include "rocblas_vector.hpp"
-#include "unit.hpp"
-#include "utility.hpp"
+#include "testing_common.hpp"
 
 /* ============================================================================================ */
 
 template <typename T>
 void testing_geam_bad_arg(const Arguments& arg)
 {
-    auto rocblas_geam_fn = arg.api == FORTRAN ? rocblas_geam<T, true> : rocblas_geam<T, false>;
+    auto rocblas_geam_fn = arg.api & c_API_FORTRAN ? rocblas_geam<T, true> : rocblas_geam<T, false>;
+    auto rocblas_geam_fn_64
+        = arg.api & c_API_FORTRAN ? rocblas_geam_64<T, true> : rocblas_geam_64<T, false>;
 
     for(auto pointer_mode : {rocblas_pointer_mode_host, rocblas_pointer_mode_device})
     {
         rocblas_local_handle handle{arg};
         CHECK_ROCBLAS_ERROR(rocblas_set_pointer_mode(handle, pointer_mode));
 
-        const rocblas_int M = 100;
-        const rocblas_int N = 99;
+        const int64_t M = 100;
+        const int64_t N = 99;
 
-        const rocblas_int lda = 100;
-        const rocblas_int ldb = 100;
-        const rocblas_int ldc = 100;
+        const int64_t lda = 100;
+        const int64_t ldb = 100;
+        const int64_t ldc = 100;
 
-        device_vector<T> alpha_d(1), beta_d(1), one_d(1), zero_d(1);
+        DEVICE_MEMCHECK(device_vector<T>, alpha_d, (1));
+        DEVICE_MEMCHECK(device_vector<T>, beta_d, (1));
+        DEVICE_MEMCHECK(device_vector<T>, one_d, (1));
+        DEVICE_MEMCHECK(device_vector<T>, zero_d, (1));
 
         const T alpha_h(1), beta_h(2), one_h(1), zero_h(0);
 
@@ -79,172 +72,162 @@ void testing_geam_bad_arg(const Arguments& arg)
         const rocblas_operation transA = rocblas_operation_none;
         const rocblas_operation transB = rocblas_operation_none;
 
-        rocblas_int A_row = transA == rocblas_operation_none ? M : N;
-        rocblas_int A_col = transA == rocblas_operation_none ? N : M;
-        rocblas_int B_row = transB == rocblas_operation_none ? M : N;
-        rocblas_int B_col = transB == rocblas_operation_none ? N : M;
+        int64_t A_row = transA == rocblas_operation_none ? M : N;
+        int64_t A_col = transA == rocblas_operation_none ? N : M;
+        int64_t B_row = transB == rocblas_operation_none ? M : N;
+        int64_t B_col = transB == rocblas_operation_none ? N : M;
 
         // Allocate device memory
-        device_matrix<T> dA(A_row, A_col, lda);
-        device_matrix<T> dB(B_row, B_col, ldb);
-        device_matrix<T> dC(M, N, ldc);
+        DEVICE_MEMCHECK(device_matrix<T>, dA, (A_row, A_col, lda));
+        DEVICE_MEMCHECK(device_matrix<T>, dB, (B_row, B_col, ldb));
+        DEVICE_MEMCHECK(device_matrix<T>, dC, (M, N, ldc));
 
-        // Check device memory allocation
-        CHECK_DEVICE_ALLOCATION(dA.memcheck());
-        CHECK_DEVICE_ALLOCATION(dB.memcheck());
-        CHECK_DEVICE_ALLOCATION(dC.memcheck());
-
-        EXPECT_ROCBLAS_STATUS(
-            rocblas_geam_fn(nullptr, transA, transB, M, N, alpha, dA, lda, beta, dB, ldb, dC, ldc),
-            rocblas_status_invalid_handle);
+        DAPI_EXPECT(rocblas_status_invalid_handle,
+                    rocblas_geam_fn,
+                    (nullptr, transA, transB, M, N, alpha, dA, lda, beta, dB, ldb, dC, ldc));
 
         // invalid values
-        EXPECT_ROCBLAS_STATUS(rocblas_geam_fn(handle,
-                                              (rocblas_operation)rocblas_fill_full,
-                                              transB,
-                                              M,
-                                              N,
-                                              alpha,
-                                              dA,
-                                              lda,
-                                              beta,
-                                              dB,
-                                              ldb,
-                                              dC,
-                                              ldc),
-                              rocblas_status_invalid_value);
+        DAPI_EXPECT(rocblas_status_invalid_value,
+                    rocblas_geam_fn,
+                    (handle,
+                     (rocblas_operation)rocblas_fill_full,
+                     transB,
+                     M,
+                     N,
+                     alpha,
+                     dA,
+                     lda,
+                     beta,
+                     dB,
+                     ldb,
+                     dC,
+                     ldc));
 
-        EXPECT_ROCBLAS_STATUS(rocblas_geam_fn(handle,
-                                              transA,
-                                              (rocblas_operation)rocblas_fill_full,
-                                              M,
-                                              N,
-                                              alpha,
-                                              dA,
-                                              lda,
-                                              beta,
-                                              dB,
-                                              ldb,
-                                              dC,
-                                              ldc),
-                              rocblas_status_invalid_value);
+        DAPI_EXPECT(rocblas_status_invalid_value,
+                    rocblas_geam_fn,
+                    (handle,
+                     transA,
+                     (rocblas_operation)rocblas_fill_full,
+                     M,
+                     N,
+                     alpha,
+                     dA,
+                     lda,
+                     beta,
+                     dB,
+                     ldb,
+                     dC,
+                     ldc));
 
         // invalid sizes not done in yaml test
 
         // A == C leading dims must match
-        EXPECT_ROCBLAS_STATUS(
-            rocblas_geam_fn(
-                handle, transA, transB, M, N, alpha, dC, ldc + 1, beta, dB, ldb, dC, ldc),
-            rocblas_status_invalid_size);
+        DAPI_EXPECT(rocblas_status_invalid_size,
+                    rocblas_geam_fn,
+                    (handle, transA, transB, M, N, alpha, dC, ldc + 1, beta, dB, ldb, dC, ldc));
 
         // B == C leading dims must match
-        EXPECT_ROCBLAS_STATUS(
-            rocblas_geam_fn(
-                handle, transA, transB, M, N, alpha, dA, lda, beta, dC, ldc + 1, dC, ldc),
-            rocblas_status_invalid_size);
+        DAPI_EXPECT(rocblas_status_invalid_size,
+                    rocblas_geam_fn,
+                    (handle, transA, transB, M, N, alpha, dA, lda, beta, dC, ldc + 1, dC, ldc));
 
         // alpha/beta
-        EXPECT_ROCBLAS_STATUS(
-            rocblas_geam_fn(handle, transA, transB, M, N, nullptr, dA, lda, beta, dB, ldb, dC, ldc),
-            rocblas_status_invalid_pointer);
+        DAPI_EXPECT(rocblas_status_invalid_pointer,
+                    rocblas_geam_fn,
+                    (handle, transA, transB, M, N, nullptr, dA, lda, beta, dB, ldb, dC, ldc));
 
-        EXPECT_ROCBLAS_STATUS(
-            rocblas_geam_fn(
-                handle, transA, transB, M, N, alpha, dA, lda, nullptr, dB, ldb, dC, ldc),
-            rocblas_status_invalid_pointer);
+        DAPI_EXPECT(rocblas_status_invalid_pointer,
+                    rocblas_geam_fn,
+                    (handle, transA, transB, M, N, alpha, dA, lda, nullptr, dB, ldb, dC, ldc));
 
         // invalid pointers
-        EXPECT_ROCBLAS_STATUS(
-            rocblas_geam_fn(
-                handle, transA, transB, M, N, alpha, dA, lda, beta, dB, ldb, nullptr, ldc),
-            rocblas_status_invalid_pointer);
+        DAPI_EXPECT(rocblas_status_invalid_pointer,
+                    rocblas_geam_fn,
+                    (handle, transA, transB, M, N, alpha, dA, lda, beta, dB, ldb, nullptr, ldc));
 
         if(pointer_mode == rocblas_pointer_mode_host)
         {
-            EXPECT_ROCBLAS_STATUS(
-                rocblas_geam_fn(
-                    handle, transA, transB, M, N, alpha, nullptr, lda, beta, dB, ldb, dC, ldc),
-                rocblas_status_invalid_pointer);
+            DAPI_EXPECT(
+                rocblas_status_invalid_pointer,
+                rocblas_geam_fn,
+                (handle, transA, transB, M, N, alpha, nullptr, lda, beta, dB, ldb, dC, ldc));
 
-            EXPECT_ROCBLAS_STATUS(
-                rocblas_geam_fn(
-                    handle, transA, transB, M, N, alpha, dA, lda, beta, nullptr, ldb, dC, ldc),
-                rocblas_status_invalid_pointer);
+            DAPI_EXPECT(
+                rocblas_status_invalid_pointer,
+                rocblas_geam_fn,
+                (handle, transA, transB, M, N, alpha, dA, lda, beta, nullptr, ldb, dC, ldc));
         }
 
         // M==0 then all may be nullptr
-        EXPECT_ROCBLAS_STATUS(rocblas_geam_fn(handle,
-                                              transA,
-                                              transB,
-                                              0,
-                                              N,
-                                              nullptr,
-                                              nullptr,
-                                              lda,
-                                              nullptr,
-                                              nullptr,
-                                              ldb,
-                                              nullptr,
-                                              ldc),
-                              rocblas_status_success);
+        DAPI_CHECK(rocblas_geam_fn,
+                   (handle,
+                    transA,
+                    transB,
+                    0,
+                    N,
+                    nullptr,
+                    nullptr,
+                    lda,
+                    nullptr,
+                    nullptr,
+                    ldb,
+                    nullptr,
+                    ldc));
 
         // N==0 then all may be nullptr
-        EXPECT_ROCBLAS_STATUS(rocblas_geam_fn(handle,
-                                              transA,
-                                              transB,
-                                              M,
-                                              0,
-                                              nullptr,
-                                              nullptr,
-                                              lda,
-                                              nullptr,
-                                              nullptr,
-                                              ldb,
-                                              nullptr,
-                                              ldc),
-                              rocblas_status_success);
+        DAPI_CHECK(rocblas_geam_fn,
+                   (handle,
+                    transA,
+                    transB,
+                    M,
+                    0,
+                    nullptr,
+                    nullptr,
+                    lda,
+                    nullptr,
+                    nullptr,
+                    ldb,
+                    nullptr,
+                    ldc));
 
         // alpha==0 then A may be nullptr
-        EXPECT_ROCBLAS_STATUS(
-            rocblas_geam_fn(
-                handle, transA, transB, M, N, zero, nullptr, lda, beta, dB, ldb, dC, ldc),
-            rocblas_status_success);
+        DAPI_CHECK(rocblas_geam_fn,
+                   (handle, transA, transB, M, N, zero, nullptr, lda, beta, dB, ldb, dC, ldc));
 
         // beta==0 then B may be nullptr
-        EXPECT_ROCBLAS_STATUS(
-            rocblas_geam_fn(
-                handle, transA, transB, M, N, alpha, dA, lda, zero, nullptr, ldb, dC, ldc),
-            rocblas_status_success);
+        DAPI_CHECK(rocblas_geam_fn,
+                   (handle, transA, transB, M, N, alpha, dA, lda, zero, nullptr, ldb, dC, ldc));
     }
 }
 
 template <typename T>
 void testing_geam(const Arguments& arg)
 {
-    auto rocblas_geam_fn = arg.api == FORTRAN ? rocblas_geam<T, true> : rocblas_geam<T, false>;
+    auto rocblas_geam_fn = arg.api & c_API_FORTRAN ? rocblas_geam<T, true> : rocblas_geam<T, false>;
+    auto rocblas_geam_fn_64
+        = arg.api & c_API_FORTRAN ? rocblas_geam_64<T, true> : rocblas_geam_64<T, false>;
 
     rocblas_operation transA = char2rocblas_operation(arg.transA);
     rocblas_operation transB = char2rocblas_operation(arg.transB);
 
-    rocblas_int M = arg.M;
-    rocblas_int N = arg.N;
+    int64_t M = arg.M;
+    int64_t N = arg.N;
 
-    rocblas_int lda = arg.lda;
-    rocblas_int ldb = arg.ldb;
-    rocblas_int ldc = arg.ldc;
+    int64_t lda = arg.lda;
+    int64_t ldb = arg.ldb;
+    int64_t ldc = arg.ldc;
 
     T alpha = arg.get_alpha<T>();
     T beta  = arg.get_beta<T>();
 
     T* dC_in_place;
 
-    rocblas_int A_row = transA == rocblas_operation_none ? M : N;
-    rocblas_int A_col = transA == rocblas_operation_none ? N : M;
-    rocblas_int B_row = transB == rocblas_operation_none ? M : N;
-    rocblas_int B_col = transB == rocblas_operation_none ? N : M;
+    int64_t A_row = transA == rocblas_operation_none ? M : N;
+    int64_t A_col = transA == rocblas_operation_none ? N : M;
+    int64_t B_row = transB == rocblas_operation_none ? M : N;
+    int64_t B_col = transB == rocblas_operation_none ? N : M;
 
-    double gpu_time_used, cpu_time_used;
-    gpu_time_used = cpu_time_used = 0.0;
+    double cpu_time_used = 0.0;
 
     double rocblas_error_1 = std::numeric_limits<double>::max();
     double rocblas_error_2 = std::numeric_limits<double>::max();
@@ -252,64 +235,50 @@ void testing_geam(const Arguments& arg)
 
     rocblas_local_handle handle{arg};
 
-    size_t size_C = size_t(ldc) * N;
+    size_t size_C = ldc * N;
 
     // argument sanity check before allocating invalid memory
     bool invalid_size = M < 0 || N < 0 || lda < A_row || ldb < B_row || ldc < M;
     if(invalid_size || !M || !N)
     {
-        EXPECT_ROCBLAS_STATUS(
-            rocblas_geam_fn(
-                handle,
-                transA,
-                transB,
-                M,
-                N,
-                nullptr,
-                nullptr,
-                lda,
-                nullptr,
-                nullptr,
-                ldb,
-                (T*)0x1, // defeat C==A or B leading dim invalid checks, C nullptr in bad_arg
-                ldc),
-            invalid_size ? rocblas_status_invalid_size : rocblas_status_success);
+        DAPI_EXPECT(invalid_size ? rocblas_status_invalid_size : rocblas_status_success,
+                    rocblas_geam_fn,
+                    (handle,
+                     transA,
+                     transB,
+                     M,
+                     N,
+                     nullptr,
+                     nullptr,
+                     lda,
+                     nullptr,
+                     nullptr,
+                     ldb,
+                     (T*)0x1, // defeat C==A or B leading dim invalid checks, C nullptr in bad_arg
+                     ldc));
         return;
     }
 
     // Naming: `h` is in CPU (host) memory(eg hA), `d` is in GPU (device) memory (eg dA).
     // Allocate host memory
-    host_matrix<T> hA(A_row, A_col, lda), hA_copy(A_row, A_col, lda);
-    host_matrix<T> hB(B_row, B_col, ldb), hB_copy(B_row, B_col, ldb);
-    host_matrix<T> hC(M, N, ldc);
-    host_matrix<T> hC_gold(M, N, ldc);
-    host_vector<T> h_alpha(1);
-    host_vector<T> h_beta(1);
+    HOST_MEMCHECK(host_matrix<T>, hA, (A_row, A_col, lda));
+    HOST_MEMCHECK(host_matrix<T>, hA_copy, (A_row, A_col, lda));
+    HOST_MEMCHECK(host_matrix<T>, hB, (B_row, B_col, ldb));
+    HOST_MEMCHECK(host_matrix<T>, hB_copy, (B_row, B_col, ldb));
+    HOST_MEMCHECK(host_matrix<T>, hC, (M, N, ldc));
+    HOST_MEMCHECK(host_matrix<T>, hC_gold, (M, N, ldc));
+    HOST_MEMCHECK(host_vector<T>, h_alpha, (1));
+    HOST_MEMCHECK(host_vector<T>, h_beta, (1));
 
     h_alpha[0] = alpha;
     h_beta[0]  = beta;
 
-    // Check host memory allocation
-    CHECK_HIP_ERROR(hA.memcheck());
-    CHECK_HIP_ERROR(hA_copy.memcheck());
-    CHECK_HIP_ERROR(hB.memcheck());
-    CHECK_HIP_ERROR(hB_copy.memcheck());
-    CHECK_HIP_ERROR(hC.memcheck());
-    CHECK_HIP_ERROR(hC_gold.memcheck());
-
     // Allocate device memory
-    device_matrix<T> dA(A_row, A_col, lda);
-    device_matrix<T> dB(B_row, B_col, ldb);
-    device_matrix<T> dC(M, N, ldc);
-    device_vector<T> d_alpha(1);
-    device_vector<T> d_beta(1);
-
-    // Check device memory allocation
-    CHECK_DEVICE_ALLOCATION(dA.memcheck());
-    CHECK_DEVICE_ALLOCATION(dB.memcheck());
-    CHECK_DEVICE_ALLOCATION(dC.memcheck());
-    CHECK_DEVICE_ALLOCATION(d_alpha.memcheck());
-    CHECK_DEVICE_ALLOCATION(d_beta.memcheck());
+    DEVICE_MEMCHECK(device_matrix<T>, dA, (A_row, A_col, lda));
+    DEVICE_MEMCHECK(device_matrix<T>, dB, (B_row, B_col, ldb));
+    DEVICE_MEMCHECK(device_matrix<T>, dC, (M, N, ldc));
+    DEVICE_MEMCHECK(device_vector<T>, d_alpha, (1));
+    DEVICE_MEMCHECK(device_vector<T>, d_beta, (1));
 
     // Initialize data on host memory
     rocblas_init_matrix(
@@ -330,8 +299,8 @@ void testing_geam(const Arguments& arg)
         {
             CHECK_ROCBLAS_ERROR(rocblas_set_pointer_mode(handle, rocblas_pointer_mode_host));
             handle.pre_test(arg);
-            CHECK_ROCBLAS_ERROR(rocblas_geam_fn(
-                handle, transA, transB, M, N, &alpha, dA, lda, &beta, dB, ldb, dC, ldc));
+            DAPI_CHECK(rocblas_geam_fn,
+                       (handle, transA, transB, M, N, &alpha, dA, lda, &beta, dB, ldb, dC, ldc));
             handle.post_test(arg);
             CHECK_HIP_ERROR(hC.transfer_from(dC));
         }
@@ -341,19 +310,62 @@ void testing_geam(const Arguments& arg)
             CHECK_ROCBLAS_ERROR(rocblas_set_pointer_mode(handle, rocblas_pointer_mode_device));
             CHECK_HIP_ERROR(d_alpha.transfer_from(h_alpha));
             CHECK_HIP_ERROR(d_beta.transfer_from(h_beta));
-            CHECK_ROCBLAS_ERROR(rocblas_geam_fn(
-                handle, transA, transB, M, N, d_alpha, dA, lda, d_beta, dB, ldb, dC, ldc));
+            DAPI_CHECK(rocblas_geam_fn,
+                       (handle, transA, transB, M, N, d_alpha, dA, lda, d_beta, dB, ldb, dC, ldc));
 
             if(arg.repeatability_check)
             {
-                host_matrix<T> hC_copy(M, N, ldc);
+                HOST_MEMCHECK(host_matrix<T>, hC_copy, (M, N, ldc));
                 CHECK_HIP_ERROR(hC.transfer_from(dC));
-                for(int i = 0; i < arg.iters; i++)
+                // multi-GPU support
+                int device_id, device_count;
+                CHECK_HIP_ERROR(limit_device_count(device_count, (int)arg.devices));
+
+                for(int dev_id = 0; dev_id < device_count; dev_id++)
                 {
-                    CHECK_ROCBLAS_ERROR(rocblas_geam_fn(
-                        handle, transA, transB, M, N, d_alpha, dA, lda, d_beta, dB, ldb, dC, ldc));
-                    CHECK_HIP_ERROR(hC_copy.transfer_from(dC));
-                    unit_check_general<T>(M, N, ldc, hC, hC_copy);
+                    CHECK_HIP_ERROR(hipGetDevice(&device_id));
+                    if(device_id != dev_id)
+                        CHECK_HIP_ERROR(hipSetDevice(dev_id));
+
+                    //New rocblas handle for new device
+                    rocblas_local_handle handle_copy{arg};
+
+                    //Allocate device memory in new device
+                    DEVICE_MEMCHECK(device_matrix<T>, dA_copy, (A_row, A_col, lda));
+                    DEVICE_MEMCHECK(device_matrix<T>, dB_copy, (B_row, B_col, ldb));
+                    DEVICE_MEMCHECK(device_matrix<T>, dC_copy, (M, N, ldc));
+                    DEVICE_MEMCHECK(device_vector<T>, d_alpha_copy, (1));
+                    DEVICE_MEMCHECK(device_vector<T>, d_beta_copy, (1));
+
+                    // copy data from CPU to device
+                    CHECK_HIP_ERROR(dA_copy.transfer_from(hA));
+                    CHECK_HIP_ERROR(dB_copy.transfer_from(hB));
+                    CHECK_HIP_ERROR(dC_copy.transfer_from(hC_gold));
+                    CHECK_HIP_ERROR(d_alpha_copy.transfer_from(h_alpha));
+                    CHECK_HIP_ERROR(d_beta_copy.transfer_from(h_beta));
+
+                    CHECK_ROCBLAS_ERROR(
+                        rocblas_set_pointer_mode(handle_copy, rocblas_pointer_mode_device));
+
+                    for(int runs = 0; runs < arg.iters; runs++)
+                    {
+                        DAPI_CHECK(rocblas_geam_fn,
+                                   (handle_copy,
+                                    transA,
+                                    transB,
+                                    M,
+                                    N,
+                                    d_alpha_copy,
+                                    dA_copy,
+                                    lda,
+                                    d_beta_copy,
+                                    dB_copy,
+                                    ldb,
+                                    dC_copy,
+                                    ldc));
+                        CHECK_HIP_ERROR(hC_copy.transfer_from(dC_copy));
+                        unit_check_general<T>(M, N, ldc, hC, hC_copy);
+                    }
                 }
                 return;
             }
@@ -411,17 +423,18 @@ void testing_geam(const Arguments& arg)
         // inplace check for dC == dA
         if(arg.pointer_mode_host)
         {
+            bool invalid_size_in_place = lda != ldc || transA != rocblas_operation_none;
+
             dC_in_place = dA;
 
             CHECK_ROCBLAS_ERROR(rocblas_set_pointer_mode(handle, rocblas_pointer_mode_host));
-            auto status_h = rocblas_geam_fn(
-                handle, transA, transB, M, N, &alpha, dA, lda, &beta, dB, ldb, dC_in_place, ldc);
 
-            if(lda != ldc || transA != rocblas_operation_none)
-            {
-                EXPECT_ROCBLAS_STATUS(status_h, rocblas_status_invalid_size);
-            }
-            else
+            DAPI_EXPECT(
+                invalid_size_in_place ? rocblas_status_invalid_size : rocblas_status_success,
+                rocblas_geam_fn,
+                (handle, transA, transB, M, N, &alpha, dA, lda, &beta, dB, ldb, dC_in_place, ldc));
+
+            if(!invalid_size_in_place)
             {
                 CHECK_HIP_ERROR(
                     hipMemcpy(hC, dC_in_place, sizeof(T) * size_C, hipMemcpyDeviceToHost));
@@ -457,20 +470,19 @@ void testing_geam(const Arguments& arg)
         // inplace check for dC == dB
         if(arg.pointer_mode_host)
         {
+            bool invalid_size_in_place = ldb != ldc || transB != rocblas_operation_none;
+
             dC_in_place = dB;
 
             CHECK_ROCBLAS_ERROR(rocblas_set_pointer_mode(handle, rocblas_pointer_mode_host));
-            auto status_h = rocblas_geam_fn(
-                handle, transA, transB, M, N, &alpha, dA, lda, &beta, dB, ldb, dC_in_place, ldc);
 
-            if(ldb != ldc || transB != rocblas_operation_none)
-            {
-                EXPECT_ROCBLAS_STATUS(status_h, rocblas_status_invalid_size);
-            }
-            else
-            {
-                CHECK_ROCBLAS_ERROR(status_h);
+            DAPI_EXPECT(
+                invalid_size_in_place ? rocblas_status_invalid_size : rocblas_status_success,
+                rocblas_geam_fn,
+                (handle, transA, transB, M, N, &alpha, dA, lda, &beta, dB, ldb, dC_in_place, ldc));
 
+            if(!invalid_size_in_place)
+            {
                 CHECK_HIP_ERROR(
                     hipMemcpy(hC, dC_in_place, sizeof(T) * size_C, hipMemcpyDeviceToHost));
 
@@ -503,24 +515,23 @@ void testing_geam(const Arguments& arg)
 
     if(arg.timing)
     {
-        int number_cold_calls = arg.cold_iters;
-        int number_hot_calls  = arg.iters;
-
-        CHECK_ROCBLAS_ERROR(rocblas_set_pointer_mode(handle, rocblas_pointer_mode_host));
-
-        for(int i = 0; i < number_cold_calls; i++)
-        {
-            rocblas_geam_fn(handle, transA, transB, M, N, &alpha, dA, lda, &beta, dB, ldb, dC, ldc);
-        }
+        double gpu_time_used;
+        int    number_cold_calls = arg.cold_iters;
+        int    total_calls       = number_cold_calls + arg.iters;
 
         hipStream_t stream;
         CHECK_ROCBLAS_ERROR(rocblas_get_stream(handle, &stream));
-        gpu_time_used = get_time_us_sync(stream); // in microseconds
-        for(int i = 0; i < number_hot_calls; i++)
+
+        for(int iter = 0; iter < total_calls; iter++)
         {
-            rocblas_geam_fn(handle, transA, transB, M, N, &alpha, dA, lda, &beta, dB, ldb, dC, ldc);
+            if(iter == number_cold_calls)
+                gpu_time_used = get_time_us_sync(stream);
+
+            DAPI_DISPATCH(rocblas_geam_fn,
+                          (handle, transA, transB, M, N, &alpha, dA, lda, &beta, dB, ldb, dC, ldc));
         }
-        gpu_time_used = get_time_us_sync(stream) - gpu_time_used;
+
+        gpu_time_used = get_time_us_sync(stream) - gpu_time_used; // in microseconds
 
         ArgumentModel<e_transA, e_transB, e_M, e_N, e_alpha, e_lda, e_beta, e_ldb, e_ldc>{}
             .log_args<T>(rocblas_cout,

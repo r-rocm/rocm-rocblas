@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2024 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2018-2025 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -31,9 +31,9 @@
 template <typename T>
 void testing_axpy_bad_arg(const Arguments& arg)
 {
-    auto rocblas_axpy_fn = arg.api == FORTRAN ? rocblas_axpy<T, true> : rocblas_axpy<T, false>;
+    auto rocblas_axpy_fn = arg.api & c_API_FORTRAN ? rocblas_axpy<T, true> : rocblas_axpy<T, false>;
     auto rocblas_axpy_fn_64
-        = arg.api == FORTRAN_64 ? rocblas_axpy_64<T, true> : rocblas_axpy_64<T, false>;
+        = arg.api & c_API_FORTRAN ? rocblas_axpy_64<T, true> : rocblas_axpy_64<T, false>;
 
     for(auto pointer_mode : {rocblas_pointer_mode_host, rocblas_pointer_mode_device})
     {
@@ -44,7 +44,8 @@ void testing_axpy_bad_arg(const Arguments& arg)
         int64_t incx = 1;
         int64_t incy = 1;
 
-        device_vector<T> alpha_d(1), zero_d(1);
+        DEVICE_MEMCHECK(device_vector<T>, alpha_d, (1));
+        DEVICE_MEMCHECK(device_vector<T>, zero_d, (1));
 
         const T alpha_h(1), zero_h(0);
 
@@ -60,12 +61,8 @@ void testing_axpy_bad_arg(const Arguments& arg)
         }
 
         // Allocate device memory
-        device_vector<T> dx(N, incx);
-        device_vector<T> dy(N, incy);
-
-        // Check device memory allocation
-        CHECK_DEVICE_ALLOCATION(dx.memcheck());
-        CHECK_DEVICE_ALLOCATION(dy.memcheck());
+        DEVICE_MEMCHECK(device_vector<T>, dx, (N, incx));
+        DEVICE_MEMCHECK(device_vector<T>, dy, (N, incy));
 
         DAPI_EXPECT(rocblas_status_invalid_handle,
                     rocblas_axpy_fn,
@@ -100,9 +97,9 @@ void testing_axpy_bad_arg(const Arguments& arg)
 template <typename T>
 void testing_axpy(const Arguments& arg)
 {
-    auto rocblas_axpy_fn = arg.api == FORTRAN ? rocblas_axpy<T, true> : rocblas_axpy<T, false>;
+    auto rocblas_axpy_fn = arg.api & c_API_FORTRAN ? rocblas_axpy<T, true> : rocblas_axpy<T, false>;
     auto rocblas_axpy_fn_64
-        = arg.api == FORTRAN_64 ? rocblas_axpy_64<T, true> : rocblas_axpy_64<T, false>;
+        = arg.api & c_API_FORTRAN ? rocblas_axpy_64<T, true> : rocblas_axpy_64<T, false>;
 
     int64_t              N       = arg.N;
     int64_t              incx    = arg.incx;
@@ -121,15 +118,12 @@ void testing_axpy(const Arguments& arg)
 
     // Naming: `h` is in CPU (host) memory(eg hx), `d` is in GPU (device) memory (eg dx).
     // Allocate host memory
-    host_vector<T> hx(N, incx);
-    host_vector<T> hy(N, incy);
-    host_vector<T> hy_gold(N, incy);
+    HOST_MEMCHECK(host_vector<T>, hx, (N, incx));
+    HOST_MEMCHECK(host_vector<T>, hy, (N, incy));
+    HOST_MEMCHECK(host_vector<T>, hy_gold, (N, incy));
 
     // Allocate device memory
-    device_vector<T> d_alpha(1, 1, HMM);
-
-    // Check device memory allocation
-    CHECK_DEVICE_ALLOCATION(d_alpha.memcheck());
+    DEVICE_MEMCHECK(device_vector<T>, d_alpha, (1, 1, HMM));
 
     // Initialize data on host memory
     rocblas_init_vector(hx, arg, rocblas_client_alpha_sets_nan, true);
@@ -146,12 +140,8 @@ void testing_axpy(const Arguments& arg)
     if(arg.unit_check || arg.norm_check)
     {
         // Allocate device memory
-        device_vector<T> dx(N, incx, HMM);
-        device_vector<T> dy(N, incy, HMM);
-
-        // Check device memory allocation
-        CHECK_DEVICE_ALLOCATION(dx.memcheck());
-        CHECK_DEVICE_ALLOCATION(dy.memcheck());
+        DEVICE_MEMCHECK(device_vector<T>, dx, (N, incx, HMM));
+        DEVICE_MEMCHECK(device_vector<T>, dy, (N, incy, HMM));
 
         // copy data from CPU to device
         CHECK_HIP_ERROR(dx.transfer_from(hx));
@@ -207,15 +197,43 @@ void testing_axpy(const Arguments& arg)
 
             if(arg.repeatability_check)
             {
-                host_vector<T> hy_copy(N, incy);
+                HOST_MEMCHECK(host_vector<T>, hy_copy, (N, incy));
                 CHECK_HIP_ERROR(hy.transfer_from(dy));
 
-                for(int i = 0; i < arg.iters; i++)
+                // multi-GPU support
+                int device_id, device_count;
+                CHECK_HIP_ERROR(limit_device_count(device_count, (int)arg.devices));
+
+                for(int dev_id = 0; dev_id < device_count; dev_id++)
                 {
-                    CHECK_HIP_ERROR(dy.transfer_from(hy_gold));
-                    DAPI_CHECK(rocblas_axpy_fn, (handle, N, d_alpha, dx, incx, dy, incy));
-                    CHECK_HIP_ERROR(hy_copy.transfer_from(dy));
-                    unit_check_general<T>(1, N, incy, hy, hy_copy);
+                    CHECK_HIP_ERROR(hipGetDevice(&device_id));
+                    if(device_id != dev_id)
+                        CHECK_HIP_ERROR(hipSetDevice(dev_id));
+
+                    //New rocblas handle for new device
+                    rocblas_local_handle handle_copy{arg};
+
+                    //Allocate device memory in new device
+                    DEVICE_MEMCHECK(device_vector<T>, dx_copy, (N, incx, HMM));
+                    DEVICE_MEMCHECK(device_vector<T>, dy_copy, (N, incy, HMM));
+                    DEVICE_MEMCHECK(device_vector<T>, d_alpha_copy, (1, 1, HMM));
+
+                    // copy data from CPU to device
+                    CHECK_HIP_ERROR(dx_copy.transfer_from(hx));
+                    CHECK_HIP_ERROR(
+                        hipMemcpy(d_alpha_copy, &h_alpha, sizeof(T), hipMemcpyHostToDevice));
+
+                    CHECK_ROCBLAS_ERROR(
+                        rocblas_set_pointer_mode(handle_copy, rocblas_pointer_mode_device));
+
+                    for(int runs = 0; runs < arg.iters; runs++)
+                    {
+                        CHECK_HIP_ERROR(dy_copy.transfer_from(hy_gold));
+                        DAPI_CHECK(rocblas_axpy_fn,
+                                   (handle_copy, N, d_alpha_copy, dx_copy, incx, dy_copy, incy));
+                        CHECK_HIP_ERROR(hy_copy.transfer_from(dy_copy));
+                        unit_check_general<T>(1, N, incy, hy, hy_copy);
+                    }
                 }
                 return;
             }

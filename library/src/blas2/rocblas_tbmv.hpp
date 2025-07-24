@@ -26,18 +26,18 @@
 #include "check_numerics_vector.hpp"
 #include "handle.hpp"
 
-template <typename T, typename U, typename X>
+template <typename API_INT, typename U, typename X>
 inline rocblas_status rocblas_tbmv_arg_check(rocblas_handle    handle,
                                              rocblas_fill      uplo,
                                              rocblas_operation transA,
                                              rocblas_diagonal  diag,
-                                             int64_t           n,
-                                             int64_t           k,
+                                             API_INT           n,
+                                             API_INT           k,
                                              U                 A,
-                                             int64_t           lda,
+                                             API_INT           lda,
                                              X                 x,
-                                             int64_t           incx,
-                                             int64_t           batch_count)
+                                             API_INT           incx,
+                                             API_INT           batch_count)
 {
     if(uplo != rocblas_fill_lower && uplo != rocblas_fill_upper)
         return rocblas_status_invalid_value;

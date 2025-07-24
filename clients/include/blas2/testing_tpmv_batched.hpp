@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2024 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2018-2025 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -28,10 +28,10 @@ template <typename T>
 void testing_tpmv_batched_bad_arg(const Arguments& arg)
 {
     auto rocblas_tpmv_batched_fn
-        = arg.api == FORTRAN ? rocblas_tpmv_batched<T, true> : rocblas_tpmv_batched<T, false>;
+        = arg.api & c_API_FORTRAN ? rocblas_tpmv_batched<T, true> : rocblas_tpmv_batched<T, false>;
 
-    auto rocblas_tpmv_batched_fn_64 = arg.api == FORTRAN_64 ? rocblas_tpmv_batched_64<T, true>
-                                                            : rocblas_tpmv_batched_64<T, false>;
+    auto rocblas_tpmv_batched_fn_64 = arg.api & c_API_FORTRAN ? rocblas_tpmv_batched_64<T, true>
+                                                              : rocblas_tpmv_batched_64<T, false>;
 
     const int64_t           N           = 100;
     const int64_t           incx        = 1;
@@ -43,12 +43,9 @@ void testing_tpmv_batched_bad_arg(const Arguments& arg)
     rocblas_local_handle handle{arg};
 
     // Allocate device memory
-    device_batch_matrix<T> dAp(1, rocblas_packed_matrix_size(N), 1, batch_count);
-    device_batch_vector<T> dx(N, incx, batch_count);
-
-    // Check device memory allocation
-    CHECK_DEVICE_ALLOCATION(dAp.memcheck());
-    CHECK_DEVICE_ALLOCATION(dx.memcheck());
+    DEVICE_MEMCHECK(
+        device_batch_matrix<T>, dAp, (1, rocblas_packed_matrix_size(N), 1, batch_count));
+    DEVICE_MEMCHECK(device_batch_vector<T>, dx, (N, incx, batch_count));
 
     // Checks.
     DAPI_EXPECT(rocblas_status_invalid_handle,
@@ -92,10 +89,10 @@ template <typename T>
 void testing_tpmv_batched(const Arguments& arg)
 {
     auto rocblas_tpmv_batched_fn
-        = arg.api == FORTRAN ? rocblas_tpmv_batched<T, true> : rocblas_tpmv_batched<T, false>;
+        = arg.api & c_API_FORTRAN ? rocblas_tpmv_batched<T, true> : rocblas_tpmv_batched<T, false>;
 
-    auto rocblas_tpmv_batched_fn_64 = arg.api == FORTRAN_64 ? rocblas_tpmv_batched_64<T, true>
-                                                            : rocblas_tpmv_batched_64<T, false>;
+    auto rocblas_tpmv_batched_fn_64 = arg.api & c_API_FORTRAN ? rocblas_tpmv_batched_64<T, true>
+                                                              : rocblas_tpmv_batched_64<T, false>;
 
     int64_t N = arg.N, incx = arg.incx, batch_count = arg.batch_count;
 
@@ -119,24 +116,15 @@ void testing_tpmv_batched(const Arguments& arg)
 
     // Naming: `h` is in CPU (host) memory(eg hAp), `d` is in GPU (device) memory (eg dAp).
     // Allocate host memory
-    host_batch_matrix<T> hA(N, N, N, batch_count);
-    host_batch_matrix<T> hAp(1, rocblas_packed_matrix_size(N), 1, batch_count);
-    host_batch_vector<T> hx(N, incx, batch_count);
-    host_batch_vector<T> hres(N, incx, batch_count);
-
-    // Check host memory allocation
-    CHECK_HIP_ERROR(hA.memcheck());
-    CHECK_HIP_ERROR(hAp.memcheck());
-    CHECK_HIP_ERROR(hx.memcheck());
-    CHECK_HIP_ERROR(hres.memcheck());
+    HOST_MEMCHECK(host_batch_matrix<T>, hA, (N, N, N, batch_count));
+    HOST_MEMCHECK(host_batch_matrix<T>, hAp, (1, rocblas_packed_matrix_size(N), 1, batch_count));
+    HOST_MEMCHECK(host_batch_vector<T>, hx, (N, incx, batch_count));
+    HOST_MEMCHECK(host_batch_vector<T>, hres, (N, incx, batch_count));
 
     // Allocate device memory
-    device_batch_matrix<T> dAp(1, rocblas_packed_matrix_size(N), 1, batch_count);
-    device_batch_vector<T> dx(N, incx, batch_count);
-
-    // Check device memory allocation
-    CHECK_DEVICE_ALLOCATION(dAp.memcheck());
-    CHECK_DEVICE_ALLOCATION(dx.memcheck());
+    DEVICE_MEMCHECK(
+        device_batch_matrix<T>, dAp, (1, rocblas_packed_matrix_size(N), 1, batch_count));
+    DEVICE_MEMCHECK(device_batch_vector<T>, dx, (N, incx, batch_count));
 
     auto dAp_on_device = dAp.ptr_on_device();
     auto dx_on_device  = dx.ptr_on_device();
@@ -171,24 +159,47 @@ void testing_tpmv_batched(const Arguments& arg)
 
         if(arg.repeatability_check)
         {
-            host_batch_vector<T> hres_copy(N, incx, batch_count);
-            CHECK_HIP_ERROR(hres_copy.memcheck());
-            for(int i = 0; i < arg.iters; i++)
+            HOST_MEMCHECK(host_batch_vector<T>, hres_copy, (N, incx, batch_count));
+            // multi-GPU support
+            int device_id, device_count;
+            CHECK_HIP_ERROR(limit_device_count(device_count, (int)arg.devices));
+
+            for(int dev_id = 0; dev_id < device_count; dev_id++)
             {
-                CHECK_HIP_ERROR(dAp.transfer_from(hAp));
-                CHECK_HIP_ERROR(dx.transfer_from(hx));
-                DAPI_CHECK(rocblas_tpmv_batched_fn,
-                           (handle,
-                            uplo,
-                            transA,
-                            diag,
-                            N,
-                            dAp_on_device,
-                            dx_on_device,
-                            incx,
-                            batch_count));
-                CHECK_HIP_ERROR(hres_copy.transfer_from(dx));
-                unit_check_general<T>(1, N, incx, hres, hres_copy, batch_count);
+                CHECK_HIP_ERROR(hipGetDevice(&device_id));
+                if(device_id != dev_id)
+                    CHECK_HIP_ERROR(hipSetDevice(dev_id));
+
+                //New rocblas handle for new device
+                rocblas_local_handle handle_copy{arg};
+
+                // Allocate device memory
+                DEVICE_MEMCHECK(device_batch_matrix<T>,
+                                dAp_copy,
+                                (1, rocblas_packed_matrix_size(N), 1, batch_count));
+                DEVICE_MEMCHECK(device_batch_vector<T>, dx_copy, (N, incx, batch_count));
+
+                CHECK_HIP_ERROR(dAp_copy.transfer_from(hAp));
+
+                CHECK_ROCBLAS_ERROR(
+                    rocblas_set_pointer_mode(handle_copy, rocblas_pointer_mode_device));
+
+                for(int runs = 0; runs < arg.iters; runs++)
+                {
+                    CHECK_HIP_ERROR(dx_copy.transfer_from(hx));
+                    DAPI_CHECK(rocblas_tpmv_batched_fn,
+                               (handle_copy,
+                                uplo,
+                                transA,
+                                diag,
+                                N,
+                                dAp_copy.ptr_on_device(),
+                                dx_copy.ptr_on_device(),
+                                incx,
+                                batch_count));
+                    CHECK_HIP_ERROR(hres_copy.transfer_from(dx_copy));
+                    unit_check_general<T>(1, N, incx, hres, hres_copy, batch_count);
+                }
             }
             return;
         }

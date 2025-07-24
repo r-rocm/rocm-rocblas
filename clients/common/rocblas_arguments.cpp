@@ -151,6 +151,10 @@ void Arguments::init()
     HMM                 = false;
     graph_test          = false;
     repeatability_check = false;
+
+    use_hipblaslt = -1;
+
+    cleanup = true;
 }
 
 bool Arguments::validate()

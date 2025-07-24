@@ -112,7 +112,7 @@ Tests:
   stride_scale: [ 1 ]
   batch_count: [ 1 ]
   pointer_mode_device: false
-  gpu_arch: '90a'
+  gpu_arch: ['90a','942']
   os_flags: LINUX
 
 - name: geam_NaN
@@ -171,8 +171,8 @@ Tests:
   transA_transB: *transA_transB_range
   matrix_size: *small_matrix_size_range
   alpha_beta: *small_alpha_beta_range
-  stride_scale: [ 1, 2      ]
-  batch_count: [ 1, 2 ]
+  stride_scale: [ 2 ]
+  batch_count: [ 2 ]
   api: [ C, FORTRAN ]
 
 - name: geam_small_complex
@@ -191,7 +191,7 @@ Tests:
   transA_transB: *transA_transB_range
   matrix_size: *small_matrix_size_range
   alpha_beta: *small_complex_alpha_beta_range
-  batch_count: [        1, 2 ]
+  batch_count: [ 2 ]
   api: [ C, FORTRAN ]
 
 - name: geam_strided_batched_small_complex
@@ -201,8 +201,8 @@ Tests:
   transA_transB: *transA_transB_range
   matrix_size: *small_matrix_size_range
   alpha_beta: *small_complex_alpha_beta_range
-  stride_scale: [ 1, 2      ]
-  batch_count: [        1, 2 ]
+  stride_scale: [ 2 ]
+  batch_count: [ 2 ]
   api: [ C, FORTRAN ]
 
 - name: geam_large
@@ -230,7 +230,7 @@ Tests:
   transA_transB: *transA_transB_range
   matrix_size: *large_matrix_size_range
   alpha_beta: *large_complex_alpha_beta_range
-  batch_count: [        1, 2 ]
+  batch_count: [ 2 ]
   pointer_mode_host: false
 
 - name: geam_strided_batched_large_complex
@@ -240,8 +240,8 @@ Tests:
   transA_transB: *transA_transB_range
   matrix_size: *large_matrix_size_range
   alpha_beta: *large_complex_alpha_beta_range
-  stride_scale: [ 1, 2      ]
-  batch_count: [        1, 2 ]
+  stride_scale: [ 2 ]
+  batch_count: [ 2 ]
   pointer_mode_host: false
 
 - name: geam_huge
@@ -260,6 +260,32 @@ Tests:
   matrix_size: *huge_matrix_size_range
   alpha_beta: *huge_complex_alpha_beta_range
   pointer_mode_device: false
+
+- name: geam_large_batch
+  category: pre_checkin # TODO
+  arguments:
+    - {  M: 2, N: 2, lda: 2, ldb: 2, ldc: 2, batch_count: *c_grid_yz_require_passes, transA: T, transB: T }
+  alpha: [1.0, 0.0]
+  beta: 1.0
+  function:
+    - geam_batched: *single_precision
+    - geam_strided_batched: *single_precision
+  stride_scale: 1
+
+- name: geam_64
+  category: stress
+  arguments:
+    - {  M: 2147483649, N: 1, lda: 2147483659, ldb: 2147483669,  ldc: 2147483689, batch_count: 1, transA: N, transB: N}
+    - {  M: 1, N: 2147483649, lda: 2147483649, ldb: 1, ldc: 1, batch_count: 1, transA: T, transB: N }
+    - {  M: 2147483649, N: 1, lda: 2147483659, ldb: 1,  ldc: 2147483689, batch_count: 1, transA: N, transB: T}
+    - {  M: 2, N: 2, lda: 2, ldb: 2, ldc: 2, batch_count: *c_grid_yz_require_passes, transA: T, transB: T }
+  api: [ C_64 ]
+  alpha_beta: *huge_alpha_beta_range
+  os_flags: [ LINUX ]
+  function:
+    - geam_strided_batched: *single_precision
+  stride_scale: 1
+  gpu_arch: '9??'
 
 - name: geam_graph_test
   category: pre_checkin
@@ -296,6 +322,7 @@ Tests:
   atomics_mode : 0
   pointer_mode_host: false
   iters: 5
+  devices: 4
   repeatability_check: true
 
 ...

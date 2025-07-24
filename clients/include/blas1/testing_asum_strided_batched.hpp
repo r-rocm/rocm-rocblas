@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2024 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2018-2025 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -22,26 +22,15 @@
 
 #pragma once
 
-#include "bytes.hpp"
-#include "cblas_interface.hpp"
-#include "flops.hpp"
-#include "near.hpp"
-#include "rocblas.hpp"
-#include "rocblas_init.hpp"
-#include "rocblas_math.hpp"
-#include "rocblas_random.hpp"
-#include "rocblas_test.hpp"
-#include "rocblas_vector.hpp"
-#include "unit.hpp"
-#include "utility.hpp"
+#include "testing_common.hpp"
 
 template <typename T>
 void testing_asum_strided_batched_bad_arg(const Arguments& arg)
 {
-    auto rocblas_asum_strided_batched_fn    = arg.api == FORTRAN
+    auto rocblas_asum_strided_batched_fn    = arg.api & c_API_FORTRAN
                                                   ? rocblas_asum_strided_batched<T, true>
                                                   : rocblas_asum_strided_batched<T, false>;
-    auto rocblas_asum_strided_batched_fn_64 = arg.api == FORTRAN_64
+    auto rocblas_asum_strided_batched_fn_64 = arg.api & c_API_FORTRAN
                                                   ? rocblas_asum_strided_batched_64<T, true>
                                                   : rocblas_asum_strided_batched_64<T, false>;
 
@@ -54,13 +43,13 @@ void testing_asum_strided_batched_bad_arg(const Arguments& arg)
         int64_t        incx        = 1;
         rocblas_stride stridex     = N;
         int64_t        batch_count = 2;
-        real_t<T>      h_rocblas_result[1];
+
+        using RT = real_t<T>;
+
+        RT h_rocblas_result[1];
 
         // Allocate device memory
-        device_strided_batch_vector<T> dx(N, incx, stridex, batch_count);
-
-        // Check device memory allocation
-        CHECK_DEVICE_ALLOCATION(dx.memcheck());
+        DEVICE_MEMCHECK(device_strided_batch_vector<T>, dx, (N, incx, stridex, batch_count));
 
         DAPI_EXPECT(rocblas_status_invalid_handle,
                     rocblas_asum_strided_batched_fn,
@@ -78,10 +67,10 @@ void testing_asum_strided_batched_bad_arg(const Arguments& arg)
 template <typename T>
 void testing_asum_strided_batched(const Arguments& arg)
 {
-    auto rocblas_asum_strided_batched_fn    = arg.api == FORTRAN
+    auto rocblas_asum_strided_batched_fn    = arg.api & c_API_FORTRAN
                                                   ? rocblas_asum_strided_batched<T, true>
                                                   : rocblas_asum_strided_batched<T, false>;
-    auto rocblas_asum_strided_batched_fn_64 = arg.api == FORTRAN_64
+    auto rocblas_asum_strided_batched_fn_64 = arg.api & c_API_FORTRAN
                                                   ? rocblas_asum_strided_batched_64<T, true>
                                                   : rocblas_asum_strided_batched_64<T, false>;
 
@@ -90,38 +79,35 @@ void testing_asum_strided_batched(const Arguments& arg)
     rocblas_stride stridex     = arg.stride_x;
     int64_t        batch_count = arg.batch_count;
 
-    double rocblas_error_1;
-    double rocblas_error_2;
+    using RT = real_t<T>;
+
+    double error_host_ptr;
+    double error_device_ptr;
 
     rocblas_local_handle handle{arg};
 
     // check to prevent undefined memory allocation error
     if(N <= 0 || incx <= 0 || batch_count <= 0)
     {
-        host_vector<real_t<T>> hr_1(std::max(int64_t(1), std::abs(batch_count)));
-        host_vector<real_t<T>> hr_2(std::max(int64_t(1), std::abs(batch_count)));
-        host_vector<real_t<T>> result_0(std::max(int64_t(1), std::abs(batch_count)));
-        CHECK_HIP_ERROR(hr_1.memcheck());
-        CHECK_HIP_ERROR(hr_2.memcheck());
-        CHECK_HIP_ERROR(result_0.memcheck());
+        HOST_MEMCHECK(
+            host_vector<RT>, rocblas_result, (std::max(int64_t(1), std::abs(batch_count))));
+        HOST_MEMCHECK(host_vector<RT>, result_0, (std::max(int64_t(1), std::abs(batch_count))));
 
-        device_vector<real_t<T>> dr(std::max(int64_t(1), std::abs(batch_count)));
-        CHECK_DEVICE_ALLOCATION(dr.memcheck());
+        DEVICE_MEMCHECK(device_vector<RT>, dr, (std::max(int64_t(1), std::abs(batch_count))));
 
         CHECK_ROCBLAS_ERROR(rocblas_set_pointer_mode(handle, rocblas_pointer_mode_host));
         DAPI_CHECK(rocblas_asum_strided_batched_fn,
-                   (handle, N, nullptr, incx, stridex, batch_count, hr_1));
+                   (handle, N, nullptr, incx, stridex, batch_count, rocblas_result));
 
         CHECK_ROCBLAS_ERROR(rocblas_set_pointer_mode(handle, rocblas_pointer_mode_device));
         DAPI_CHECK(rocblas_asum_strided_batched_fn,
                    (handle, N, nullptr, incx, stridex, batch_count, dr));
 
-        CHECK_HIP_ERROR(hr_2.transfer_from(dr));
-
         if(batch_count > 0)
         {
-            unit_check_general<real_t<T>, real_t<T>>(1, batch_count, 1, result_0, hr_1);
-            unit_check_general<real_t<T>, real_t<T>>(1, batch_count, 1, result_0, hr_2);
+            unit_check_general<RT, RT>(1, batch_count, 1, result_0, rocblas_result);
+            CHECK_HIP_ERROR(rocblas_result.transfer_from(dr));
+            unit_check_general<RT, RT>(1, batch_count, 1, result_0, rocblas_result);
         }
 
         return;
@@ -129,21 +115,13 @@ void testing_asum_strided_batched(const Arguments& arg)
 
     // Naming: `h` is in CPU (host) memory(eg hx), `d` is in GPU (device) memory (eg dx).
     // Allocate host memory
-    host_strided_batch_vector<T> hx(N, incx, stridex, batch_count);
-    host_vector<real_t<T>>       hr_1(batch_count);
-    host_vector<real_t<T>>       hr_2(batch_count);
-    host_vector<real_t<T>>       hr_gold(batch_count);
-
-    // Check host memory allocation
-    CHECK_HIP_ERROR(hx.memcheck());
+    HOST_MEMCHECK(host_strided_batch_vector<T>, hx, (N, incx, stridex, batch_count));
+    HOST_MEMCHECK(host_vector<RT>, rocblas_result, (batch_count));
+    HOST_MEMCHECK(host_vector<RT>, hr_gold, (batch_count));
 
     // Allocate device memory
-    device_strided_batch_vector<T> dx(N, incx, stridex, batch_count);
-    device_vector<real_t<T>>       dr(batch_count);
-
-    // Check device memory allocation
-    CHECK_DEVICE_ALLOCATION(dx.memcheck());
-    CHECK_DEVICE_ALLOCATION(dr.memcheck());
+    DEVICE_MEMCHECK(device_strided_batch_vector<T>, dx, (N, incx, stridex, batch_count));
+    DEVICE_MEMCHECK(device_vector<RT>, dr, (batch_count));
 
     // Initialize memory on host.
     rocblas_init_vector(hx, arg, rocblas_client_alpha_sets_nan, true);
@@ -159,7 +137,7 @@ void testing_asum_strided_batched(const Arguments& arg)
         {
             CHECK_ROCBLAS_ERROR(rocblas_set_pointer_mode(handle, rocblas_pointer_mode_host));
             DAPI_CHECK(rocblas_asum_strided_batched_fn,
-                       (handle, N, dx, incx, stridex, batch_count, hr_1));
+                       (handle, N, dx, incx, stridex, batch_count, rocblas_result));
         }
 
         if(arg.pointer_mode_device)
@@ -172,14 +150,40 @@ void testing_asum_strided_batched(const Arguments& arg)
 
             if(arg.repeatability_check)
             {
-                host_vector<real_t<T>> hr_copy(batch_count);
-                CHECK_HIP_ERROR(hr_2.transfer_from(dr));
-                for(int i = 0; i < arg.iters; i++)
+                HOST_MEMCHECK(host_vector<RT>, hr_copy, (batch_count));
+
+                CHECK_HIP_ERROR(rocblas_result.transfer_from(dr));
+
+                // multi-GPU support
+                int device_id, device_count;
+                CHECK_HIP_ERROR(limit_device_count(device_count, (int)arg.devices));
+
+                for(int dev_id = 0; dev_id < device_count; dev_id++)
                 {
-                    DAPI_CHECK(rocblas_asum_strided_batched_fn,
-                               (handle, N, dx, incx, stridex, batch_count, dr));
-                    CHECK_HIP_ERROR(hr_copy.transfer_from(dr));
-                    unit_check_general<real_t<T>, real_t<T>>(batch_count, 1, 1, hr_2, hr_copy);
+                    CHECK_HIP_ERROR(hipGetDevice(&device_id));
+                    if(device_id != dev_id)
+                        CHECK_HIP_ERROR(hipSetDevice(dev_id));
+
+                    //New rocblas handle for new device
+                    rocblas_local_handle handle_copy{arg};
+
+                    //Allocate device memory in new device
+                    DEVICE_MEMCHECK(
+                        device_strided_batch_vector<T>, dx_copy, (N, incx, stridex, batch_count));
+                    DEVICE_MEMCHECK(device_vector<RT>, dr_copy, (batch_count));
+
+                    CHECK_HIP_ERROR(dx_copy.transfer_from(hx));
+
+                    CHECK_ROCBLAS_ERROR(
+                        rocblas_set_pointer_mode(handle_copy, rocblas_pointer_mode_device));
+
+                    for(int runs = 0; runs < arg.iters; runs++)
+                    {
+                        DAPI_CHECK(rocblas_asum_strided_batched_fn,
+                                   (handle_copy, N, dx_copy, incx, stridex, batch_count, dr_copy));
+                        CHECK_HIP_ERROR(hr_copy.transfer_from(dr_copy));
+                        unit_check_general<RT, RT>(batch_count, 1, 1, rocblas_result, hr_copy);
+                    }
                 }
                 return;
             }
@@ -193,47 +197,41 @@ void testing_asum_strided_batched(const Arguments& arg)
         }
         cpu_time_used = get_time_us_no_sync() - cpu_time_used;
 
-        double abs_error = std::numeric_limits<real_t<T>>::epsilon() * sqrt(N) * hr_gold[0];
-        double tolerance = 2.0;
-        abs_error *= tolerance;
+        auto compare_to_gold = [&] {
+            if(arg.unit_check)
+            {
+                // Near check for asum ILP64 bit
+                bool near_check = arg.initialization == rocblas_initialization::hpl;
+                if(near_check)
+                {
+                    for(int64_t b = 0; b < batch_count; ++b)
+                    {
+                        double abs_error = sum_near_tolerance<T>(N, hr_gold[b]);
+                        near_check_general<RT, RT>(
+                            1, 1, 1, hr_gold + b, rocblas_result + b, abs_error);
+                    }
+                }
+                else
+                    unit_check_general<RT, RT>(batch_count, 1, 1, hr_gold, rocblas_result);
+            }
 
-        // Near check for asum ILP64 bit
-        bool near_check = arg.initialization == rocblas_initialization::hpl;
+            double error = 0.0;
+            if(arg.norm_check)
+            {
+                error = std::abs((hr_gold[0] - rocblas_result[0]) / hr_gold[0]);
+            }
+            return error;
+        };
 
         if(arg.pointer_mode_host)
         {
-            if(arg.unit_check)
-            {
-                if(near_check)
-                    near_check_general<real_t<T>, real_t<T>>(
-                        batch_count, 1, 1, hr_gold, hr_1, abs_error);
-                else
-                    unit_check_general<real_t<T>, real_t<T>>(batch_count, 1, 1, hr_gold, hr_1);
-            }
-
-            if(arg.norm_check)
-            {
-                rocblas_error_1 = std::abs((hr_gold[0] - hr_1[0]) / hr_gold[0]);
-            }
+            error_host_ptr = compare_to_gold();
         }
 
         if(arg.pointer_mode_device)
         {
-            CHECK_HIP_ERROR(hr_2.transfer_from(dr));
-
-            if(arg.unit_check)
-            {
-                if(near_check)
-                    near_check_general<real_t<T>, real_t<T>>(
-                        batch_count, 1, 1, hr_gold, hr_2, abs_error);
-                else
-                    unit_check_general<real_t<T>, real_t<T>>(batch_count, 1, 1, hr_gold, hr_2);
-            }
-
-            if(arg.norm_check)
-            {
-                rocblas_error_2 = std::abs((hr_gold[0] - hr_2[0]) / hr_gold[0]);
-            }
+            CHECK_HIP_ERROR(rocblas_result.transfer_from(dr));
+            error_device_ptr = compare_to_gold();
         }
     }
 
@@ -244,6 +242,7 @@ void testing_asum_strided_batched(const Arguments& arg)
         int    total_calls       = number_cold_calls + arg.iters;
 
         CHECK_ROCBLAS_ERROR(rocblas_set_pointer_mode(handle, rocblas_pointer_mode_device));
+
         hipStream_t stream;
         CHECK_ROCBLAS_ERROR(rocblas_get_stream(handle, &stream));
 
@@ -264,7 +263,7 @@ void testing_asum_strided_batched(const Arguments& arg)
                                                                             asum_gflop_count<T>(N),
                                                                             asum_gbyte_count<T>(N),
                                                                             cpu_time_used,
-                                                                            rocblas_error_1,
-                                                                            rocblas_error_2);
+                                                                            error_host_ptr,
+                                                                            error_device_ptr);
     }
 }

@@ -22,9 +22,10 @@ Definitions:
     - { M:    10, N:    11, lda:   100, incx:     3, ldc:    13 }
 
   - &large_matrix_size_range
-    - { M:   192, N:   193, lda:   194, incx:     1, ldc:   196 }
-    - { M:   640, N:   641, lda:   960, incx:    -2, ldc:   962 }
-    - { M:  1001, N:  1000, lda:  1003, incx:     3, ldc:  1001 }
+    - { M:   192, N:     193,   lda:   194, incx:     1, ldc:   196 }
+    - { M:   640, N:     641,   lda:   960, incx:    -2, ldc:   962 }
+    - { M:  1001, N:    1000,   lda:  1003, incx:     3, ldc:  1001 }
+    - { M:     2, N: 4300000,   lda:     2, incx:     1, ldc:     4 } # Test 16-bit overflow in grid Y
 
   - &huge_matrix_size_range
     - { M:  4011, N:  4012, lda:  4012, incx:     2, ldc:  4014 }
@@ -62,7 +63,7 @@ Tests:
     - { M:  2048, N:  2048, lda:    2048, ldc:    2048, incx: 1049100 }
   batch_count: [        1    ]
   api: C
-  gpu_arch: '90a'
+  gpu_arch: ['90a','942']
   os_flags: LINUX
 
 - name: dgmm_quick_return
@@ -191,6 +192,31 @@ Tests:
   side: [L, R]
   matrix_size: *huge_matrix_size_range
 
+- name: dgmm_large_batch
+  category: pre_checkin # TODO
+  arguments:
+    - {  M: 2, N: 2, lda: 2, ldb: 2, ldc: 2, incx: 1, batch_count: *c_grid_yz_require_passes }
+  side: [L, R]
+  function:
+    - dgmm_batched: *single_precision
+    - dgmm_strided_batched: *single_precision
+  stride_scale: 1
+
+- name: dgmm_64
+  category: stress
+  arguments:
+    - {  M: 2147483649, N: 1, lda: 2147483649, incx: 1,  ldc: 2147483649, batch_count: 1 }
+    - {  M: 1, N: 2147483649, lda: 1, incx: 1,  ldc: 1, batch_count: 1 }
+    - {  M: 1, N: 1, lda: 1, incx: -2147483649,  batch_count: 1 }
+    - {  M: 2, N: 2, lda: 4, incx: 2, batch_count: *c_grid_yz_require_passes }
+  api: [ C_64 ]
+  side: [L, R]
+  os_flags: [ LINUX ]
+  function:
+    - dgmm: *single_precision
+  stride_scale: 1
+  gpu_arch: '9??'
+
 - name: dgmm_graph_test
   category: pre_checkin
   function:
@@ -221,5 +247,6 @@ Tests:
   initialization: hpl
   pointer_mode_host: false
   iters : 5
+  devices: 4
   repeatability_check: true
 ...

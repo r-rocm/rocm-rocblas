@@ -51,6 +51,8 @@ namespace
         if(!handle)
             return rocblas_status_invalid_handle;
 
+        Logger logger;
+
         if(!handle->is_device_memory_size_query())
         {
             auto layer_mode = handle->layer_mode;
@@ -63,52 +65,52 @@ namespace
                 auto diag_letter   = rocblas_diag_letter(diag);
 
                 if(layer_mode & rocblas_layer_mode_log_trace)
-                    log_trace(
+                    logger.log_trace(
                         handle, rocblas_tbmv_name<T>, uplo, transA, diag, n, k, A, lda, x, incx);
 
                 if(layer_mode & rocblas_layer_mode_log_bench)
                 {
-                    log_bench(handle,
-                              ROCBLAS_API_BENCH " -f tbmv -r",
-                              rocblas_precision_string<T>,
-                              "--uplo",
-                              uplo_letter,
-                              "--transposeA",
-                              transA_letter,
-                              "--diag",
-                              diag_letter,
-                              "-n",
-                              n,
-                              "-k",
-                              k,
-                              "--lda",
-                              lda,
-                              "--incx",
-                              incx);
+                    logger.log_bench(handle,
+                                     ROCBLAS_API_BENCH " -f tbmv -r",
+                                     rocblas_precision_string<T>,
+                                     "--uplo",
+                                     uplo_letter,
+                                     "--transposeA",
+                                     transA_letter,
+                                     "--diag",
+                                     diag_letter,
+                                     "-n",
+                                     n,
+                                     "-k",
+                                     k,
+                                     "--lda",
+                                     lda,
+                                     "--incx",
+                                     incx);
                 }
 
                 if(layer_mode & rocblas_layer_mode_log_profile)
-                    log_profile(handle,
-                                rocblas_tbmv_name<T>,
-                                "uplo",
-                                uplo_letter,
-                                "transA",
-                                transA_letter,
-                                "diag",
-                                diag_letter,
-                                "N",
-                                n,
-                                "k",
-                                k,
-                                "lda",
-                                lda,
-                                "incx",
-                                incx);
+                    logger.log_profile(handle,
+                                       rocblas_tbmv_name<T>,
+                                       "uplo",
+                                       uplo_letter,
+                                       "transA",
+                                       transA_letter,
+                                       "diag",
+                                       diag_letter,
+                                       "N",
+                                       n,
+                                       "k",
+                                       k,
+                                       "lda",
+                                       lda,
+                                       "incx",
+                                       incx);
             }
         }
 
         rocblas_status arg_status
-            = rocblas_tbmv_arg_check<T>(handle, uplo, transA, diag, n, k, A, lda, x, incx, 1);
+            = rocblas_tbmv_arg_check(handle, uplo, transA, diag, n, k, A, lda, x, incx, API_INT(1));
         if(arg_status != rocblas_status_continue)
             return arg_status;
         if(!A || !x)

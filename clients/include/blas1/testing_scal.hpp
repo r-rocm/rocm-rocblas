@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2024 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2018-2025 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -22,6 +22,7 @@
 
 #pragma once
 
+#include "benchmark.hpp"
 #include "testing_common.hpp"
 
 #include "blas1/rocblas_scal.hpp" // internal API
@@ -30,9 +31,9 @@ template <typename T, typename U = T>
 void testing_scal_bad_arg(const Arguments& arg)
 {
     auto rocblas_scal_fn
-        = arg.api == FORTRAN ? rocblas_scal<T, U, true> : rocblas_scal<T, U, false>;
+        = arg.api & c_API_FORTRAN ? rocblas_scal<T, U, true> : rocblas_scal<T, U, false>;
     auto rocblas_scal_fn_64
-        = arg.api == FORTRAN_64 ? rocblas_scal_64<T, U, true> : rocblas_scal_64<T, U, false>;
+        = arg.api & c_API_FORTRAN ? rocblas_scal_64<T, U, true> : rocblas_scal_64<T, U, false>;
 
     int64_t N     = 100;
     int64_t incx  = 1;
@@ -41,10 +42,7 @@ void testing_scal_bad_arg(const Arguments& arg)
     rocblas_local_handle handle{arg};
 
     // Allocate device memory
-    device_vector<T> dx(N, incx);
-
-    // Check device memory allocation
-    CHECK_DEVICE_ALLOCATION(dx.memcheck());
+    DEVICE_MEMCHECK(device_vector<T>, dx, (N, incx));
 
     DAPI_EXPECT(rocblas_status_invalid_handle, rocblas_scal_fn, (nullptr, N, &alpha, dx, incx));
     DAPI_EXPECT(rocblas_status_invalid_pointer, rocblas_scal_fn, (handle, N, nullptr, dx, incx));
@@ -56,13 +54,14 @@ template <typename T, typename U = T>
 void testing_scal(const Arguments& arg)
 {
     auto rocblas_scal_fn
-        = arg.api == FORTRAN ? rocblas_scal<T, U, true> : rocblas_scal<T, U, false>;
+        = arg.api & c_API_FORTRAN ? rocblas_scal<T, U, true> : rocblas_scal<T, U, false>;
     auto rocblas_scal_fn_64
-        = arg.api == FORTRAN_64 ? rocblas_scal_64<T, U, true> : rocblas_scal_64<T, U, false>;
+        = arg.api & c_API_FORTRAN ? rocblas_scal_64<T, U, true> : rocblas_scal_64<T, U, false>;
 
     int64_t N       = arg.N;
     int64_t incx    = arg.incx;
     U       h_alpha = arg.get_alpha<U>();
+    bool    HMM     = arg.HMM;
 
     rocblas_local_handle handle{arg};
 
@@ -76,18 +75,13 @@ void testing_scal(const Arguments& arg)
 
     // Naming: `h` is in CPU (host) memory(eg hx), `d` is in GPU (device) memory (eg dx).
     // Allocate host memory
-    host_vector<T> hx(N, incx);
-    host_vector<T> hx_gold(N, incx);
-    host_vector<U> halpha(1);
+    HOST_MEMCHECK(host_vector<T>, hx, (N, incx));
+    HOST_MEMCHECK(host_vector<T>, hx_gold, (N, incx));
+    HOST_MEMCHECK(host_vector<U>, halpha, (1));
     halpha[0] = h_alpha;
 
     // Allocate device memory
-    device_vector<T> dx(N, incx);
-    device_vector<U> d_alpha(1);
-
-    // Check device memory allocation
-    CHECK_DEVICE_ALLOCATION(dx.memcheck());
-    CHECK_DEVICE_ALLOCATION(d_alpha.memcheck());
+    DEVICE_MEMCHECK(device_vector<U>, d_alpha, (1));
 
     // Initial Data on CPU
     rocblas_init_vector(hx, arg, rocblas_client_alpha_sets_nan, true);
@@ -95,14 +89,17 @@ void testing_scal(const Arguments& arg)
     // copy vector is easy in STL; hx_gold = hx: hx_gold which will be output of CPU BLAS
     hx_gold = hx;
 
-    // copy data from CPU to device
-    CHECK_HIP_ERROR(dx.transfer_from(hx));
-
     double gpu_time_used, cpu_time_used;
     double rocblas_error_host   = 0.0;
     double rocblas_error_device = 0.0;
     if(arg.unit_check || arg.norm_check)
     {
+        // Allocate device memory
+        DEVICE_MEMCHECK(device_vector<T>, dx, (N, incx));
+
+        // copy data from CPU to device
+        CHECK_HIP_ERROR(dx.transfer_from(hx));
+
         if(arg.pointer_mode_host)
         {
             // GPU BLAS, rocblas_pointer_mode_host
@@ -139,14 +136,38 @@ void testing_scal(const Arguments& arg)
 
             if(arg.repeatability_check)
             {
-                host_vector<T> hx_copy(N, incx);
+                HOST_MEMCHECK(host_vector<T>, hx_copy, (N, incx));
                 CHECK_HIP_ERROR(hx.transfer_from(dx));
-                for(int i = 0; i < arg.iters; i++)
+
+                // multi-GPU support
+                int device_id, device_count;
+                CHECK_HIP_ERROR(limit_device_count(device_count, (int)arg.devices));
+
+                for(int dev_id = 0; dev_id < device_count; dev_id++)
                 {
-                    CHECK_HIP_ERROR(dx.transfer_from(hx_gold));
-                    DAPI_CHECK(rocblas_scal_fn, (handle, N, d_alpha, dx, incx));
-                    CHECK_HIP_ERROR(hx_copy.transfer_from(dx));
-                    unit_check_general<T>(1, N, incx, hx, hx_copy);
+                    CHECK_HIP_ERROR(hipGetDevice(&device_id));
+                    if(device_id != dev_id)
+                        CHECK_HIP_ERROR(hipSetDevice(dev_id));
+
+                    //New rocblas handle for new device
+                    rocblas_local_handle handle_copy{arg};
+
+                    // Allocate device memory
+                    DEVICE_MEMCHECK(device_vector<T>, dx_copy, (N, incx));
+                    DEVICE_MEMCHECK(device_vector<U>, d_alpha_copy, (1));
+
+                    CHECK_HIP_ERROR(d_alpha_copy.transfer_from(halpha));
+
+                    CHECK_ROCBLAS_ERROR(
+                        rocblas_set_pointer_mode(handle_copy, rocblas_pointer_mode_device));
+
+                    for(int runs = 0; runs < arg.iters; runs++)
+                    {
+                        CHECK_HIP_ERROR(dx_copy.transfer_from(hx_gold));
+                        DAPI_CHECK(rocblas_scal_fn, (handle_copy, N, d_alpha_copy, dx_copy, incx));
+                        CHECK_HIP_ERROR(hx_copy.transfer_from(dx_copy));
+                        unit_check_general<T>(1, N, incx, hx, hx_copy);
+                    }
                 }
                 return;
             }
@@ -189,26 +210,36 @@ void testing_scal(const Arguments& arg)
 
     if(arg.timing)
     {
-        int number_cold_calls = arg.cold_iters;
-        int total_calls       = number_cold_calls + arg.iters;
+        size_t aligned_stride_x = align_stride<T>(size_t(N) * (incx >= 0 ? incx : -incx));
 
-        CHECK_ROCBLAS_ERROR(rocblas_set_pointer_mode(handle, rocblas_pointer_mode_host));
+        size_t x_size        = incx >= 0 ? N * incx * sizeof(T) : N * (-incx) * sizeof(T);
+        size_t x_cached_size = x_size;
+
+        size_t flush_batch_count = calculate_flush_batch_count(
+            arg.flush_batch_count, arg.flush_memory_size, x_cached_size);
+
+        // allocate device rotating buffer arrays
+        DEVICE_MEMCHECK(device_strided_batch_vector<T>,
+                        dx_rot_buff,
+                        (N, incx, aligned_stride_x, flush_batch_count, HMM));
+
+        CHECK_HIP_ERROR(dx_rot_buff.broadcast_one_vector_from(hx));
 
         hipStream_t stream;
         CHECK_ROCBLAS_ERROR(rocblas_get_stream(handle, &stream));
-        for(int iter = 0; iter < total_calls; iter++)
-        {
-            if(iter == number_cold_calls)
-                gpu_time_used = get_time_us_sync(stream);
 
-            DAPI_DISPATCH(rocblas_scal_fn, (handle, N, &h_alpha, dx, incx));
-        }
+        auto lambda_to_benchmark = [&](int flush_index) {
+            DAPI_DISPATCH(rocblas_scal_fn, (handle, N, &h_alpha, dx_rot_buff[flush_index], incx));
+        };
 
-        gpu_time_used = get_time_us_sync(stream) - gpu_time_used;
+        Benchmark<decltype(lambda_to_benchmark)> benchmark_scal(
+            lambda_to_benchmark, stream, arg, flush_batch_count);
+
+        benchmark_scal.run_timer();
 
         ArgumentModel<e_N, e_alpha, e_incx>{}.log_args<T>(rocblas_cout,
                                                           arg,
-                                                          gpu_time_used,
+                                                          benchmark_scal.get_hot_time(),
                                                           scal_gflop_count<T, U>(N),
                                                           scal_gbyte_count<T>(N),
                                                           cpu_time_used,
