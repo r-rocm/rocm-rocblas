@@ -1,3 +1,9 @@
+rocm-rocblas (6.4.2-1) trixie; urgency=medium
+
+  * Release 6.4.2-1
+
+ --  <chenxuan@iscas.ac.cn>  Thu, 24 Jul 2025 11:17:14 +0800
+
 rocm-rocblas (6.2.4-3) unstable; urgency=medium
 
   * Rebuild with new Trixie base
