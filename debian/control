@@ -13,6 +13,7 @@ Build-Depends:
  rocm-env,
  rocm-hip-on-rocclr-dev,
  rocm-llvm,
+ rocm-roctracer-dev,
 Standards-Version: 4.7.0
 Homepage: https://github.com/ROCm/rocPRIM
 Vcs-Browser: https://github.com/revyos-rocm/rocm-rocblas
