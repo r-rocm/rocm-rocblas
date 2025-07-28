@@ -63,14 +63,30 @@ REVYOS_ROCM_ROCBLAS_CMAKE_PARAMS += -DBUILD_FORTRAN_CLIENTS=OFF
 %:
 	dh $@
 
-# -DTensile_CODE_OBJECT_VERSION=default
-# -DTensile_LOGIC=asm_full
-# -DTensile_SEPARATE_ARCHITECTURES=ON
-# -DTensile_LAZY_LIBRARY_LOADING=ON
-# -DTensile_LIBRARY_FORMAT=msgpack
-# -DTENSILE_VENV_UPGRADE_PIP=ON
+MaintFunc/FixPath:
+	sed -i "s@opt/rocm@opt/rocm-${ROCM_VERSION}@g" \
+		clients/cmake/FindROCmSMI.cmake \
+		clients/CMakeLists.txt \
+		rmake.py \
+		rmake.py \
+		rmake.py \
+		toolchain-linux.cmake \
+		header_compilation_tests.sh \
+		library/src/tensile_host.cpp \
+		library/src/include/handle.hpp \
+		scripts/utilities/check_for_pretuned_sizes_c/Makefile \
+		scripts/performance/blas/getspecs.py \
+		scripts/performance/blas/commandrunner.py \
+		CMakeLists.txt
+	sed -i "s@amdclang@clang@g" \
+		cmake/toolchain-options.cmake \
+		cmake/build-options.cmake \
+		toolchain-linux.cmake \
+		header_compilation_tests.sh \
+		scripts/utilities/check_for_pretuned_sizes_c/Makefile
+	sed -i "s@llvm/bin@bin@g" CMakeLists.txt
 
-override_dh_auto_configure:
+override_dh_auto_configure: MaintFunc/FixPath
 	cmake $(REVYOS_ROCM_CMAKE_PARAMS) \
 		$(REVYOS_ROCM_MATH_CMAKE_PARAMS) \
 		$(REVYOS_ROCM_ROCBLAS_CMAKE_PARAMS)
