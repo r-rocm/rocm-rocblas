@@ -1,6 +1,7 @@
 rocm-rocblas (6.4.3-1) trixie; urgency=medium
 
   * Release 6.4.3-1
+  * Only gfx1100 enabled
 
  -- CHEN Xuan <chenxuan@iscas.ac.cn>  Thu, 04 Sep 2025 21:22:06 +0800
 
