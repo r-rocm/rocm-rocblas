@@ -78,12 +78,6 @@ MaintFunc/FixPath:
 		scripts/performance/blas/getspecs.py \
 		scripts/performance/blas/commandrunner.py \
 		CMakeLists.txt
-	sed -i "s@amdclang@clang@g" \
-		cmake/toolchain-options.cmake \
-		cmake/build-options.cmake \
-		toolchain-linux.cmake \
-		header_compilation_tests.sh \
-		scripts/utilities/check_for_pretuned_sizes_c/Makefile
 	sed -i "s@llvm/bin@bin@g" CMakeLists.txt
 
 override_dh_auto_configure: MaintFunc/FixPath
