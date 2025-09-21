@@ -12,11 +12,11 @@ Build-Depends:
  python3-rocm-tensile,
  rocm-cmake,
  rocm-core,
- rocm-env,
+ rocm-env (>= 7.0.0),
  rocm-hip-on-rocclr-dev,
  rocm-rocminfo,
  rocm-rocr-dev,
- rocm-llvm,
+ rocm-llvm (>= 7.0.0),
  rocm-roctracer-dev,
 Standards-Version: 4.7.0
 Homepage: https://github.com/ROCm/rocPRIM
@@ -32,7 +32,7 @@ Depends:
  python3-rocm-tensile,
  rocm-cmake,
  rocm-core,
- rocm-env,
+ rocm-env (>= 7.0.0),
  rocm-hip-on-rocclr,
 Description: Next generation BLAS implementation for ROCm platform - binary
  rocBLAS is the ROCm Basic Linear Algebra Subprograms (BLAS) library. rocBLAS is
