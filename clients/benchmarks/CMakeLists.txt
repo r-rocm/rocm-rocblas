@@ -1,5 +1,5 @@
 # ########################################################################
-# Copyright (C) 2016-2024 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (C) 2016-2025 Advanced Micro Devices, Inc. All rights reserved.
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -57,27 +57,26 @@ target_link_libraries( rocblas-bench PRIVATE rocblas_clients_testing_common rocb
 if( BUILD_FORTRAN_CLIENTS )
   target_link_libraries( rocblas-bench PRIVATE rocblas_fortran_client )
 endif( )
-target_link_libraries( rocblas-bench PRIVATE roc::rocblas hip::host hip::device ${BLAS_LIBRARY} ${GTEST_BOTH_LIBRARIES} )
+target_link_libraries( rocblas-bench PRIVATE roc::rocblas hip::host hip::device ${BLAS_LIBRARY} $<IF:$<TARGET_EXISTS:GTest::gtest>,GTest::gtest,GTest::GTest> $<IF:$<TARGET_EXISTS:GTest::gtest_main>,GTest::gtest_main,GTest::Main> )
 
 if( BUILD_WITH_TENSILE )
   target_link_libraries( rocblas-gemm-tune PRIVATE rocblas_clients_testing_common rocblas_clients_common )
   if( BUILD_FORTRAN_CLIENTS )
     target_link_libraries( rocblas-gemm-tune PRIVATE rocblas_fortran_client )
   endif( )
-  target_link_libraries( rocblas-gemm-tune PRIVATE roc::rocblas hip::host hip::device ${BLAS_LIBRARY} ${GTEST_BOTH_LIBRARIES} )
+  target_link_libraries( rocblas-gemm-tune PRIVATE roc::rocblas hip::host hip::device ${BLAS_LIBRARY} $<IF:$<TARGET_EXISTS:GTest::gtest>,GTest::gtest,GTest::GTest> $<IF:$<TARGET_EXISTS:GTest::gtest_main>,GTest::gtest_main,GTest::Main> )
 endif()
 
 if (NOT WIN32)
   list( APPEND COMMON_LINK_LIBS "-lm -lstdc++fs" )
-  if (NOT BUILD_FORTRAN_CLIENTS)
-    list( APPEND COMMON_LINK_LIBS "-lgfortran") # for lapack
-  endif()
 endif()
 
 
 target_link_libraries( rocblas-bench PRIVATE ${COMMON_LINK_LIBS} )
+apply_omp_settings( rocblas-bench )
 if( BUILD_WITH_TENSILE )
   target_link_libraries( rocblas-gemm-tune PRIVATE ${COMMON_LINK_LIBS} )
+  apply_omp_settings( rocblas-gemm-tune )
 endif()
 
 target_compile_options(rocblas-bench PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${COMMON_CXX_OPTIONS}>)
@@ -86,18 +85,8 @@ if( BUILD_WITH_TENSILE )
 endif()
 
 target_compile_definitions( rocblas-bench PRIVATE ROCBLAS_BENCH ROCM_USE_FLOAT16 ROCBLAS_INTERNAL_API ROCBLAS_NO_DEPRECATED_WARNINGS ${TENSILE_DEFINES} GOOGLE_TEST ${BLIS_DEFINES} )
-
-if(NOT BUILD_SHARED_LIBS)
-   target_compile_definitions( rocblas-bench PRIVATE ROCBLAS_STATIC_LIB)
-endif()
-
 if( BUILD_WITH_TENSILE )
   target_compile_definitions( rocblas-gemm-tune PRIVATE ROCBLAS_BENCH ROCM_USE_FLOAT16 ROCBLAS_INTERNAL_API ROCBLAS_NO_DEPRECATED_WARNINGS ${TENSILE_DEFINES} )
-
-  if(NOT BUILD_SHARED_LIBS)
-     target_compile_definitions( rocblas-gemm-tune PRIVATE ROCBLAS_STATIC_LIB)
-  endif()
-
 endif()
 
 if ( NOT BUILD_FORTRAN_CLIENTS )
@@ -106,11 +95,6 @@ if ( NOT BUILD_FORTRAN_CLIENTS )
     target_compile_definitions( rocblas-gemm-tune PRIVATE CLIENTS_NO_FORTRAN )
   endif()
 endif()
-
-if ( WARN_NOT_ILP64_PREFERRED )
-  target_compile_definitions( rocblas-bench PRIVATE ROCBLAS_REFERENCE_LIB=${BLAS_LIBRARY} )
-endif()
-
 
 set_target_properties( rocblas-bench PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/staging")
 if( BUILD_WITH_TENSILE )

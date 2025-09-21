@@ -177,6 +177,9 @@ all ``rocblas_int`` arguments are replaced by the type name
 precision. Function-level documentation is not repeated for these APIs because they are identical in behavior to the LP64 versions.
 However, functions which support this alternate API include the line:
 ``This function supports the 64-bit integer interface (ILP64)``.
+When parameters exceeding the internal maximum supported size are provided
+the functions will return ``rocblas_status_invalid_size``.  This is most often for symmetric matrix dimensions larger than the ``int32_t`` max value,
+for which such large memory allocation is not practical.
 
 Column-major storage and 1-based indexing
 -----------------------------------------
@@ -288,23 +291,13 @@ result is shown in the figure below:
 Kernel launch status error checking
 -----------------------------------
 
-The function ``hipPeekAtLastError()`` is called before and after a rocBLAS kernel launches.
+The function ``hipExtGetLastError()`` is called after a rocBLAS kernel launches.
 This function detects if the launch parameters are incorrect, for example,
 an invalid work group or thread block size. It also determines if the kernel code is unable to
-run on the current GPU device. In that case, it returns ``rocblas_status_arch_mismatch``.
-
-Note that ``hipPeekAtLastError()`` does not flush the last error.
-As a detection system, the disadvantage of having ``hipPeekAtLastError()`` only report changes is
-that if the previous last error from another kernel launch or HIP call is the same
-as the error from the current kernel, no error is reported.
-In this case, only the first error would be reported.
-
-You can avoid this behavior by flushing any previous HIP error before calling a rocBLAS function
-by calling ``hipGetLastError()``. Both ``hipPeekAtLastError()`` and ``hipGetLastError()`` run
-synchronously on the CPU and only verify the kernel
-launch, not the asynchronous work done by the kernel. rocBLAS does not clear the last error
-because the caller might be relying on it to detect errors in
-a batch of HIP and rocBLAS function calls.
+run on the current GPU device. In that case, it returns a status of ``rocblas_status_arch_mismatch``.
+Thus most rocblas API functions that launch kernels will flush a pre-existing error.
+You can check for any previous HIP error before calling a rocBLAS API function
+by calling ``hipGetLastError()``.
 
 Complex number data types
 -------------------------
@@ -341,8 +334,7 @@ Some functions within the rocBLAS library such as ``gemv``, ``symv``, ``trsv``, 
 and ``gemm`` can use atomic operations to increase performance.
 By using atomics, functions might not give bit-wise reproducible results.
 Differences between multiple runs should not be significant and the results will
-remain accurate. However, if you require identical results across multiple runs,
-atomics should be turned off. For more information, see :any:`rocblas_atomics_mode`,
+remain accurate. If you want to allow atomic operations, see :any:`rocblas_atomics_mode`,
 :any:`rocblas_set_atomics_mode`, and :any:`rocblas_get_atomics_mode`.
 
 In addition to the API above, rocBLAS also provides the environment variable ``ROCBLAS_DEFAULT_ATOMICS_MODE``,
@@ -363,12 +355,9 @@ In rocBLAS, bitwise-reproducible results can be obtained under the following con
 *  Identical GFX target ISA
 *  Single HIP stream active per rocBLAS handle
 *  Identical ROCm versions
-*  Disabled atomic operations (for more information, see :ref:`Atomic Operations`)
+*  Atomic operations are not allowed (for more information, see :ref:`Atomic Operations`)
 
-By default, rocBLAS might use atomic operations to achieve better performance in some functions.
-To ensure bitwise reproducible results when users require identical results across multiple runs,
-the functions in the list below require atomics to be disabled.
-All other functions are bitwise reproducible by default.
+By default, atomic operations are not allowed. All other functions are bitwise reproducible by default.
 
 .. note::
 
@@ -376,9 +365,9 @@ All other functions are bitwise reproducible by default.
    If device memory is unavailable, these functions proceed to use an unoptimized kernel, which could also produce variable results.
    To notify users that an unoptimized kernel is being used, the function returns the :any:`rocblas_status_perf_degraded` status.
 
-=================================
-Functions using atomic operations
-=================================
+======================================================
+Functions that can be enabled to use atomic operations
+======================================================
 
  :any:`rocblas_sgemv`
  :any:`rocblas_dgemv`
