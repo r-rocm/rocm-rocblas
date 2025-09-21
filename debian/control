@@ -9,6 +9,7 @@ Build-Depends:
  git,
  libblas-dev,
  pkg-config,
+ python3-joblib,
  python3-rocm-tensile,
  rocm-cmake,
  rocm-core,
