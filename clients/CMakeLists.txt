@@ -1,5 +1,5 @@
 # ########################################################################
-# Copyright (C) 2016-2024 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (C) 2016-2025 Advanced Micro Devices, Inc. All rights reserved.
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -21,6 +21,24 @@
 # ########################################################################
 
 cmake_minimum_required( VERSION 3.16.8 )
+
+function( apply_omp_settings lib_target_ )
+  if (CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND TARGET OpenMP::OpenMP_CXX)
+    set_target_properties( ${lib_target_} PROPERTIES
+      BUILD_RPATH "${HIP_CLANG_ROOT}/lib"
+    )
+    set_target_properties( ${lib_target_} PROPERTIES
+      INSTALL_RPATH "$ORIGIN/../llvm/lib"
+    )
+  elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND TARGET OpenMP::omp)
+    set_target_properties( ${lib_target_} PROPERTIES
+      BUILD_RPATH "${HIP_CLANG_ROOT}/${openmp_LIB_DIR}"
+    )
+    set_target_properties( ${lib_target_} PROPERTIES
+      INSTALL_RPATH "$ORIGIN/../llvm/${openmp_LIB_DIR}"
+    )
+  endif()
+endfunction()
 
 # This has to be initialized before the project() command appears
 # Set the default of CMAKE_BUILD_TYPE to be release, unless user specifies with -D.  MSVC_IDE does not use CMAKE_BUILD_TYPE
@@ -69,20 +87,21 @@ endif()
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
-# if it fails to find OpenMP compile and link flags in strange configurations it can just use non-parallel reference computation
-# if there is no omp.h to find the client compilation will fail and this should be obvious, used to be REQUIRED
-find_package(OpenMP)
-
-if (TARGET OpenMP::OpenMP_CXX)
-  set( COMMON_LINK_LIBS "OpenMP::OpenMP_CXX")
-  get_filename_component(LIBOMP_PATH "${OpenMP_omp_LIBRARY}" PATH)
-  if (NOT WIN32)
-    list( APPEND COMMON_LINK_LIBS "-Wl,-rpath=${LIBOMP_PATH}")
-  endif()
+if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  # Look for openmp config in ROCm install to populate openmp_LIB_DIR and openmp_LIB_INSTALL_DIR
+  find_package(OpenMP CONFIG PATHS "${HIP_CLANG_ROOT}/lib/cmake")
 endif()
 
-if (WIN32)
-  list( APPEND COMMON_LINK_LIBS "libomp")
+if (CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND TARGET OpenMP::omp)
+  set( COMMON_LINK_LIBS "OpenMP::omp")
+  message(STATUS "Found openmp-config.cmake at ${OpenMP_DIR}")
+else()
+  # if it fails to find OpenMP compile and link flags in strange configurations it can just use non-parallel reference computation
+  # if there is no omp.h to find the client compilation will fail and this should be obvious, used to be REQUIRED
+  find_package(OpenMP)
+  if (TARGET OpenMP::OpenMP_CXX)
+    set( COMMON_LINK_LIBS "OpenMP::OpenMP_CXX")
+  endif()
 endif()
 
 if (TARGET Threads::Threads)
@@ -117,7 +136,10 @@ endif( )
 if( BUILD_CLIENTS_BENCHMARKS OR BUILD_CLIENTS_TESTS)
   if ( NOT WIN32 )
     if (LINK_BLIS)
-      if(EXISTS          "/opt/AMD/aocl/aocl-linux-gcc-4.2.0/gcc/lib_ILP64/libblis-mt.a" )
+      if(EXISTS          "/opt/AMD/aocl/aocl-linux-gcc-5.0.0/gcc/lib_ILP64/libblis-mt.a" )
+        set( BLAS_LIBRARY /opt/AMD/aocl/aocl-linux-gcc-5.0.0/gcc/lib_ILP64/libblis-mt.a )
+        set( BLIS_INCLUDE_DIR /opt/AMD/aocl/aocl-linux-gcc-5.0.0/gcc/include_ILP64/ )
+      elseif(EXISTS          "/opt/AMD/aocl/aocl-linux-gcc-4.2.0/gcc/lib_ILP64/libblis-mt.a" )
         set( BLAS_LIBRARY /opt/AMD/aocl/aocl-linux-gcc-4.2.0/gcc/lib_ILP64/libblis-mt.a )
         set( BLIS_INCLUDE_DIR /opt/AMD/aocl/aocl-linux-gcc-4.2.0/gcc/include_ILP64/ )
       elseif(EXISTS      "/opt/AMD/aocl/aocl-linux-aocc-4.1.0/aocc/lib_ILP64/libblis-mt.a" )
@@ -140,10 +162,22 @@ if( BUILD_CLIENTS_BENCHMARKS OR BUILD_CLIENTS_TESTS)
         set( BLAS_LIBRARY /usr/local/lib/libblis.a )
         set( BLIS_INCLUDE_DIR /usr/local/include/blis )
       else()
-        message( WARNING "Could not find libblis" )
+        find_package(PkgConfig)
+        if(NOT PKG_CONFIG_FOUND)
+          message( FATAL_ERROR "Could not find libblis and pkgconfig is not available" )
+        else()
+          pkg_search_module(PKGBLAS cblas)
+          if(PKGBLAS_FOUND)
+            set( BLAS_LIBRARY ${PKGBLAS_LIBRARIES} )
+            set( BLAS_INCLUDE_DIR ${PKGBLAS_INCLUDE_DIRS} )
+          else()
+            message( FATAL_ERROR "Could not find libblis and pkgconfig can not find any other implementation of cblas" )
+          endif()
+        endif()
       endif()
     else()
-      set( BLAS_LIBRARY "blas" )
+      find_package( BLAS REQUIRED )
+      set( BLAS_LIBRARY "${BLAS_LIBRARIES}" )
     endif()
   else() # WIN32
     file(TO_CMAKE_PATH "C:/Program\ Files/AMD/AOCL-Windows/amd-blis/lib/ILP64/AOCL-LibBlis-Win-MT.lib" AOCL_BLAS_LIBRARY)
@@ -158,7 +192,7 @@ if( BUILD_CLIENTS_BENCHMARKS OR BUILD_CLIENTS_TESTS)
                     NO_DEFAULT_PATH
                   )
       if (NOT BLAS_LIBRARY)
-        find_package( OPENBLAS CONFIG REQUIRED )
+        find_package( OpenBLAS CONFIG REQUIRED )
         set( BLAS_LIBRARY OpenBLAS::OpenBLAS )
         set( BLAS_INCLUDE_DIR "" )
       endif()
@@ -170,7 +204,7 @@ if( BUILD_CLIENTS_BENCHMARKS OR BUILD_CLIENTS_TESTS)
     set( BLIS_CPP ../common/blis_interface.cpp )
   endif()
 
-  message(STATUS "Linking Reference BLAS LIB: ${BLAS_LIBRARY}")
+  message(STATUS "Linking reference BLAS LIB: ${BLAS_LIBRARY}")
 
   if ( WARN_NOT_ILP64_PREFERRED )
     message( WARNING "Using ${BLAS_LIBRARY} as reference library, 64-bit tests may fail. Test suite should be run with --gtest_filter=-*stress*")
@@ -208,18 +242,6 @@ add_custom_command( OUTPUT "${ROCBLAS_TEMPLATE}"
                     DEPENDS include/rocblas_template.yaml
                     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" )
 
-set( ROCBLAS_SMOKE "${PROJECT_BINARY_DIR}/staging/rocblas_smoke.yaml")
-add_custom_command( OUTPUT "${ROCBLAS_SMOKE}"
-                    COMMAND ${CMAKE_COMMAND} -E copy include/rocblas_smoke.yaml "${ROCBLAS_SMOKE}"
-                    DEPENDS include/rocblas_smoke.yaml
-                    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" )
-
-set( ROCBLAS_EXTRAS "${PROJECT_BINARY_DIR}/staging/rocblas_extras.yaml")
-add_custom_command( OUTPUT "${ROCBLAS_EXTRAS}"
-                    COMMAND ${CMAKE_COMMAND} -E copy include/rocblas_extras.yaml "${ROCBLAS_EXTRAS}"
-                    DEPENDS include/rocblas_extras.yaml
-                    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" )
-
 set( ROCBLAS_GENERAL_YAML "${PROJECT_BINARY_DIR}/staging/rocblas_general.yaml")
 add_custom_command( OUTPUT "${ROCBLAS_GENERAL_YAML}"
                     COMMAND ${CMAKE_COMMAND} -E copy include/rocblas_general.yaml "${ROCBLAS_GENERAL_YAML}"
@@ -238,13 +260,14 @@ add_custom_command( OUTPUT "${ROCBLAS_CLIENTS_README}"
                     DEPENDS rocblas_clients_readme.txt
                     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" )
 
-add_custom_target( rocblas-common DEPENDS "${ROCBLAS_COMMON}" "${ROCBLAS_TEMPLATE}" "${ROCBLAS_SMOKE}" "${ROCBLAS_EXTRAS}" "${ROCBLAS_GENERAL_YAML}" "${ROCBLAS_GENTEST}" "${ROCBLAS_CLIENTS_README}" )
+add_custom_target( rocblas-common DEPENDS "${ROCBLAS_COMMON}" "${ROCBLAS_TEMPLATE}" "${ROCBLAS_GENERAL_YAML}" "${ROCBLAS_GENTEST}" "${ROCBLAS_CLIENTS_README}" )
 
 rocm_install(
-  FILES ${ROCBLAS_COMMON} ${ROCBLAS_TEMPLATE} ${ROCBLAS_SMOKE} ${ROCBLAS_EXTRAS} ${ROCBLAS_GENERAL_YAML}
+  FILES ${ROCBLAS_COMMON} ${ROCBLAS_TEMPLATE} ${ROCBLAS_GENERAL_YAML}
   DESTINATION "${CMAKE_INSTALL_BINDIR}"
   COMPONENT clients-common
 )
+
 rocm_install(
   PROGRAMS ${ROCBLAS_GENTEST}
   DESTINATION "${CMAKE_INSTALL_BINDIR}"
